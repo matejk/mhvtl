@@ -61,8 +61,8 @@ static struct density_info density_lto8 = {
 	20669, 127, 6656, 12000000, medium_density_code_lto8,
 	"LTO-CVE", "U-832", "Ultrium 8/32T"};
 static struct density_info density_lto9 = {
-	21456, 127, 8960, 18000000, medium_density_code_lto9,
-	"LTO-CVE", "U-932", "Ultrium 9/48T"};
+	21459, 127, 8960, 18000000, medium_density_code_lto9,
+	"LTO-CVE", "U-932", "Ultrium 9/32T"};
 
 static struct name_to_media_info media_info[] = {
 	{"LTO1", Media_LTO1,
