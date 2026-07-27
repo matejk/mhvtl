@@ -131,6 +131,7 @@ struct device_type_template smc_template = {
 		/* 0x90 -> 0x9f */
 		/* 0xa0 -> 0xaf */
 		SCSI_OP(0xa0, spc_illegal_op), /* processed in the kernel module */
+		SCSI_OP(0xa3, spc_maintenance_in),
 		SCSI_OP(0xa5, smc_move_medium),
 
 		/* 0xb0 -> 0xbf */
@@ -146,16 +147,6 @@ struct device_type_template smc_template = {
 
 __attribute__((constructor)) static void smc_init(void) {
 	device_type_register(&lunit, &smc_template);
-}
-
-/*
- * Update ops[xx] with new/updated/custom function 'f'
- */
-void register_ops(struct lu_phy_attr *lu, int op,
-				  void *f, void *g, void *h) {
-	lu->scsi_ops->ops[op].cmd_perform	   = f;
-	lu->scsi_ops->ops[op].pre_cmd_perform  = g;
-	lu->scsi_ops->ops[op].post_cmd_perform = h;
 }
 
 /*

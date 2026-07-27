@@ -502,9 +502,24 @@ struct scsi_cmd {
 	struct lu_phy_attr *lu;
 };
 
-#define SCSI_OP(opcode, fn) \
-	[opcode] = {            \
-		.cmd_perform = fn,  \
+/* Recommended command timeouts, in seconds, reported by REPORT SUPPORTED
+ * OPERATION CODES. A non-zero timeout also marks the op code as supported,
+ * which is what SCSI_OP_RANGE(0x00, 0xff, spc_illegal_op) leaves at zero.
+ */
+#define MHVTL_DEF_CMD_TIMEOUT  900
+#define MHVTL_LONG_CMD_TIMEOUT 3600
+
+#define SCSI_OP(opcode, fn)                    \
+	[opcode] = {                               \
+		.cmd_perform = fn,                     \
+		.timeout	 = MHVTL_DEF_CMD_TIMEOUT,  \
+	}
+
+/* As SCSI_OP(), for commands that can keep the drive busy for a long time */
+#define SCSI_OP_TO(opcode, fn, to) \
+	[opcode] = {                   \
+		.cmd_perform = fn,         \
+		.timeout	 = to,         \
 	}
 
 #define SCSI_OP_RANGE(lo_op, hi_op, fn) \
@@ -516,6 +531,7 @@ struct device_type_operations {
 	uint8_t (*cmd_perform)(struct scsi_cmd *cmd);
 	int (*pre_cmd_perform)(struct scsi_cmd *cmd, void *p);
 	int (*post_cmd_perform)(struct scsi_cmd *cmd, void *p);
+	uint32_t timeout; /* Seconds; 0 => op code not supported */
 };
 
 struct device_type_template {

@@ -869,7 +869,7 @@ static uint8_t configure_timestamp(struct scsi_cmd *cmd) {
 uint8_t ssc_a3_service_action(struct scsi_cmd *cmd) {
 	declare_ssc_vars;
 
-	switch (cdb[1]) {
+	switch (cdb[1] & 0x1f) {
 	case MANAGEMENT_PROTOCOL_IN:
 		log_opcode("MANAGEMENT PROTOCOL IN **", cmd);
 		break;
@@ -877,8 +877,7 @@ uint8_t ssc_a3_service_action(struct scsi_cmd *cmd) {
 		log_opcode("REPORT ALIASES **", cmd);
 		break;
 	case REPORT_SUPPORTED_OPCODES:
-		log_opcode("REPORT SUPPORTED OPCODES **", cmd);
-		break;
+		return spc_report_supported_opcodes(cmd);
 	case REPORT_TIMESTAMP:
 		MHVTL_DBG(1, "REPORT TIMESTAMP (%ld) **", (long)dbuf_p->serialNo);
 		return report_timestamp(cmd);
@@ -893,7 +892,7 @@ uint8_t ssc_a3_service_action(struct scsi_cmd *cmd) {
 uint8_t ssc_a4_service_action(struct scsi_cmd *cmd) {
 	declare_ssc_vars;
 
-	switch (cdb[1]) {
+	switch (cdb[1] & 0x1f) {
 	case MANAGEMENT_PROTOCOL_OUT:
 		log_opcode("MANAGEMENT PROTOCOL OUT **", cmd);
 		break;

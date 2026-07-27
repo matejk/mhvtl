@@ -366,6 +366,7 @@ void init_sdlt320_ssc(struct lu_phy_attr *lu);
 void init_sdlt600_ssc(struct lu_phy_attr *lu);
 
 void register_ops(struct lu_phy_attr *lu, int op, void *f, void *g, void *h);
+void unregister_ops(struct lu_phy_attr *lu, int op);
 
 uint8_t valid_encryption_blk(struct scsi_cmd *cmd);
 uint8_t check_restrictions(struct scsi_cmd *cmd);

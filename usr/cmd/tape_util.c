@@ -165,7 +165,15 @@ uint8_t valid_encryption_blk(struct scsi_cmd *cmd) {
 	return TRUE;
 }
 
+/* Overrides the libvtlscsi definition: the personality modules linked here
+ * call it during setup, but this tool never dispatches SCSI commands.
+ */
 void register_ops(struct lu_phy_attr *lu, int op, void *f, void *g, void *h) {
+	if (debug)
+		printf("Entering %s() +++\n", __func__);
+}
+
+void unregister_ops(struct lu_phy_attr *lu, int op) {
 	if (debug)
 		printf("Entering %s() +++\n", __func__);
 }

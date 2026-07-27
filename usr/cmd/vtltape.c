@@ -1840,31 +1840,31 @@ static struct device_type_template ssc_ops = {
 
 		/* 0x00 -> 0x0f */
 		SCSI_OP(0x00, ssc_tur),
-		SCSI_OP(0x01, ssc_rewind),
+		SCSI_OP_TO(0x01, ssc_rewind, MHVTL_LONG_CMD_TIMEOUT),
 		SCSI_OP(0x03, spc_request_sense),
-		SCSI_OP(0x04, ssc_format_medium),
+		SCSI_OP_TO(0x04, ssc_format_medium, MHVTL_LONG_CMD_TIMEOUT),
 		SCSI_OP(0x05, ssc_read_block_limits),
 		SCSI_OP(0x08, ssc_read_6),
 		SCSI_OP(0x0a, ssc_write_6),
 		SCSI_OP(0x0b, ssc_set_capacity),
 
 		/* 0x10 -> 0x1f */
-		SCSI_OP(0x10, ssc_write_filemarks),
-		SCSI_OP(0x11, ssc_space_6),
+		SCSI_OP_TO(0x10, ssc_write_filemarks, MHVTL_LONG_CMD_TIMEOUT),
+		SCSI_OP_TO(0x11, ssc_space_6, MHVTL_LONG_CMD_TIMEOUT),
 		SCSI_OP(0x12, spc_inquiry),
 		SCSI_OP(0x13, ssc_verify_6),
 		SCSI_OP(0x15, ssc_mode_select),
 		SCSI_OP(0x16, ssc_reserve),
 		SCSI_OP(0x17, ssc_release),
-		SCSI_OP(0x19, ssc_erase),
+		SCSI_OP_TO(0x19, ssc_erase, MHVTL_LONG_CMD_TIMEOUT),
 		SCSI_OP(0x1a, spc_mode_sense),
-		SCSI_OP(0x1b, ssc_load_unload),
+		SCSI_OP_TO(0x1b, ssc_load_unload, MHVTL_LONG_CMD_TIMEOUT),
 		SCSI_OP(0x1c, ssc_recv_diagnostics),
 		SCSI_OP(0x1d, ssc_send_diagnostics),
 		SCSI_OP(0x1e, ssc_allow_prevent_removal),
 
 		/* 0x20 -> 0x2f */
-		SCSI_OP(0x2b, ssc_locate),
+		SCSI_OP_TO(0x2b, ssc_locate, MHVTL_LONG_CMD_TIMEOUT),
 
 		/* 0x30 -> 0x3f */
 		SCSI_OP(0x34, ssc_read_position),
@@ -1889,8 +1889,8 @@ static struct device_type_template ssc_ops = {
 		SCSI_OP(0x8d, ssc_write_attributes),
 
 		/* 0x90 -> 0x9f */
-		SCSI_OP(0x91, ssc_space_16),
-		SCSI_OP(0x92, ssc_locate),
+		SCSI_OP_TO(0x91, ssc_space_16, MHVTL_LONG_CMD_TIMEOUT),
+		SCSI_OP_TO(0x92, ssc_locate, MHVTL_LONG_CMD_TIMEOUT),
 
 		/* 0xa0 -> 0xaf */
 		SCSI_OP(0xa0, spc_illegal_op), /* processed in the kernel module */
@@ -1904,16 +1904,6 @@ static struct device_type_template ssc_ops = {
 		/* 0xe0 -> 0xef */
 		/* 0xf0 -> 0xff */
 	}};
-
-/*
- * Update ops[xx] with new/updated/custom function 'f'
- */
-void register_ops(struct lu_phy_attr *lu, int op,
-				  void *f, void *g, void *h) {
-	lu->scsi_ops->ops[op].cmd_perform	   = f;
-	lu->scsi_ops->ops[op].pre_cmd_perform  = g;
-	lu->scsi_ops->ops[op].post_cmd_perform = h;
-}
 
 #define MALLOC_SZ 512
 static int init_lu(struct lu_phy_attr *lu, unsigned minor, struct mhvtl_ctl *ctl) {
