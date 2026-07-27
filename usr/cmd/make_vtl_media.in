@@ -57,8 +57,8 @@ set_media_type()
 
 	e0_regex='[A-Z0-9]{6,8}([J])([WXY])$'
 	# LTO WORM cartridges are labelled LT, LU, LV, LW, LX, LY, LZ for
-	# generations 3 to 9.
-	lto_regex='[A-Z0-9]{6,8}([L])([TUVWXYZ])$'
+	# generations 3 to 9, and LH for generation 10.
+	lto_regex='[A-Z0-9]{6,8}([L])([TUVWXYZH])$'
 
 	# default to data type
 	MEDIA_TYPE="data"
@@ -88,7 +88,7 @@ set_density()
 
 	# I'm sure there is a better method then this...
 	# There is.. Thanks to Gavin Barnard.
-	regex='[A-Z0-9]{6,8}([SLXTJD])([123456789ABKUVWXYZ])$'
+	regex='[A-Z0-9]{6,8}([SLXTJDP])([123456789ABHKUVWXYZ])$'
 	#regex='[A-Z0-9]{4,6}([SLXTJ])([123456ABWX])[0-9]*$' # for bacula
 	DENSITY=UNKNOWN
 
@@ -96,7 +96,7 @@ set_density()
 		#matches=${#BASH_REMATCH[*]}
 		if [ ${BASH_REMATCH[1]} = 'L' ]; then
 			# Data cartridges carry the generation digit, WORM cartridges
-			# a letter.
+			# a letter, and generation 10 uses 'A' for data and 'H' for WORM.
 			case ${BASH_REMATCH[2]} in
 			T)	DENSITY="LTO3" ;;
 			U)	DENSITY="LTO4" ;;
@@ -105,8 +105,14 @@ set_density()
 			X)	DENSITY="LTO7" ;;
 			Y)	DENSITY="LTO8" ;;
 			Z)	DENSITY="LTO9" ;;
+			A|H)	DENSITY="LTO10" ;;
 			*)	DENSITY="LTO${BASH_REMATCH[2]}" ;;
 			esac
+		elif [ ${BASH_REMATCH[1]} = 'P' ]; then
+			# Ultrium 10 Premium (40TB) data cartridge
+			if [ ${BASH_REMATCH[2]} = 'A' ]; then
+				DENSITY="LTO10P"
+			fi
 		elif [ ${BASH_REMATCH[1]} = 'D' ]; then
 			if [ ${BASH_REMATCH[2]} = '7' ]; then
 				DENSITY="DLT4"

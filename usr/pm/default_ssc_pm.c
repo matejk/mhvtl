@@ -95,6 +95,14 @@ static struct name_to_media_info media_info[] = {
 	 media_type_lto9_data, medium_density_code_lto9},
 	{"LTO9 WORM", Media_LTO9_WORM,
 	 media_type_lto9_worm, medium_density_code_lto9},
+	{"LTO10", Media_LTO10,
+	 media_type_lto10_data, medium_density_code_lto10},
+	{"LTO10 Clean", Media_LTO10_CLEAN,
+	 media_type_lto10_data, medium_density_code_lto10},
+	{"LTO10 WORM", Media_LTO10_WORM,
+	 media_type_lto10_worm, medium_density_code_lto10},
+	{"LTO10P", Media_LTO10P,
+	 media_type_lto10p_data, medium_density_code_lto10p},
 
 	/* IBM 03592 media */
 	{"03592 JA", Media_3592_JA,
@@ -446,6 +454,8 @@ void init_default_ssc(struct lu_phy_attr *lu) {
 	add_drive_media_list(lu, LOAD_RW, "LTO7");
 	add_drive_media_list(lu, LOAD_RW, "LTO8");
 	add_drive_media_list(lu, LOAD_RW, "LTO9");
+	add_drive_media_list(lu, LOAD_RW, "LTO10");
+	add_drive_media_list(lu, LOAD_RW, "LTO10P");
 
 	/* DDS media */
 	add_drive_media_list(lu, LOAD_RW, "DDS1");

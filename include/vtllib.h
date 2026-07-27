@@ -522,6 +522,14 @@ enum Media_Type_list {
 	Media_9940A_CLEAN,
 	Media_9940B,
 	Media_9940B_CLEAN,
+	/* New media types are appended here rather than grouped with their own
+	 * generation: the value is stored as MediaType in the MAM of every
+	 * cartridge, so inserting one would re-type existing media on disk.
+	 */
+	Media_LTO10,
+	Media_LTO10_CLEAN,
+	Media_LTO10_WORM,
+	Media_LTO10P,
 	Media_UNKNOWN /* always last */
 };
 

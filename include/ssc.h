@@ -348,6 +348,7 @@ void init_ult3580_td6(struct lu_phy_attr *lu);
 void init_ult3580_td7(struct lu_phy_attr *lu);
 void init_ult3580_td8(struct lu_phy_attr *lu);
 void init_ult3580_td9(struct lu_phy_attr *lu);
+void init_ult3580_tda(struct lu_phy_attr *lu);
 void init_hp_ult_1(struct lu_phy_attr *lu);
 void init_hp_ult_2(struct lu_phy_attr *lu);
 void init_hp_ult_3(struct lu_phy_attr *lu);

@@ -347,6 +347,29 @@ add_ibm_ultrium_9_drive()
 	add_drive $ID $CH $TARGET $LUN $VENDORID $PRODUCTID $PRODUCTREV $UNITSERNO $LIB $SLOT $DENSITY
 }
 
+# add_ibm_ultrium_10_drive(DevID, Channel, Target, Lun, S/No, LibID, Slot)
+# Takes Ultrium 10 media only: barcodes ending LA, LH (WORM) or PA (Premium).
+add_ibm_ultrium_10_drive()
+{
+	if (( $# != 7 )) ; then
+		echo "internal error: expected 7 arguments, got $#" 1>&2
+		exit 1
+	fi
+	ID=$1
+	CH=$2
+	TARGET=$3
+	LUN=$4
+	UNITSERNO=$5
+	LIB=$6
+	SLOT=$7
+	VENDORID="IBM"
+	PRODUCTID="ULT3580-TDA"
+	PRODUCTREV="2160"
+	DENSITY="62"
+
+	add_drive $ID $CH $TARGET $LUN $VENDORID $PRODUCTID $PRODUCTREV $UNITSERNO $LIB $SLOT $DENSITY
+}
+
 # add_stk_t10kb_drive(DevID, Channel, Target, Lun, S/No, LibID, Slot)
 add_stk_t10kb_drive()
 {
