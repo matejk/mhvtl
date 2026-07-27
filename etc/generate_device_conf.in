@@ -325,6 +325,28 @@ add_ibm_ultrium_8_drive()
 	add_drive $ID $CH $TARGET $LUN $VENDORID $PRODUCTID $PRODUCTREV $UNITSERNO $LIB $SLOT $DENSITY
 }
 
+# add_ibm_ultrium_9_drive(DevID, Channel, Target, Lun, S/No, LibID, Slot)
+add_ibm_ultrium_9_drive()
+{
+	if (( $# != 7 )) ; then
+		echo "internal error: expected 7 arguments, got $#" 1>&2
+		exit 1
+	fi
+	ID=$1
+	CH=$2
+	TARGET=$3
+	LUN=$4
+	UNITSERNO=$5
+	LIB=$6
+	SLOT=$7
+	VENDORID="IBM"
+	PRODUCTID="ULT3580-TD9"
+	PRODUCTREV="2160"
+	DENSITY="60"
+
+	add_drive $ID $CH $TARGET $LUN $VENDORID $PRODUCTID $PRODUCTREV $UNITSERNO $LIB $SLOT $DENSITY
+}
+
 # add_stk_t10kb_drive(DevID, Channel, Target, Lun, S/No, LibID, Slot)
 add_stk_t10kb_drive()
 {
