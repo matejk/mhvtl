@@ -56,7 +56,9 @@ set_media_type()
 	type=$1
 
 	e0_regex='[A-Z0-9]{6,8}([J])([WXY])$'
-	lto_regex='[A-Z0-9]{6,8}([L])([TUVW])$'
+	# LTO WORM cartridges are labelled LT, LU, LV, LW, LX, LY, LZ for
+	# generations 3 to 9.
+	lto_regex='[A-Z0-9]{6,8}([L])([TUVWXYZ])$'
 
 	# default to data type
 	MEDIA_TYPE="data"
@@ -86,24 +88,25 @@ set_density()
 
 	# I'm sure there is a better method then this...
 	# There is.. Thanks to Gavin Barnard.
-	regex='[A-Z0-9]{6,8}([SLXTJD])([12345678ABKUVWXYZ])$'
+	regex='[A-Z0-9]{6,8}([SLXTJD])([123456789ABKUVWXYZ])$'
 	#regex='[A-Z0-9]{4,6}([SLXTJ])([123456ABWX])[0-9]*$' # for bacula
 	DENSITY=UNKNOWN
 
 	if [[ $density =~ $regex ]]; then
 		#matches=${#BASH_REMATCH[*]}
 		if [ ${BASH_REMATCH[1]} = 'L' ]; then
-			if [ ${BASH_REMATCH[2]} = 'T' ]; then
-				DENSITY="LTO3"
-			elif [ ${BASH_REMATCH[2]} = 'U' ]; then
-				DENSITY="LTO4"
-			elif [ ${BASH_REMATCH[2]} = 'V' ]; then
-				DENSITY="LTO5"
-			elif [ ${BASH_REMATCH[2]} = 'W' ]; then
-				DENSITY="LTO6"
-			else
-				DENSITY="LTO${BASH_REMATCH[2]}"
-			fi
+			# Data cartridges carry the generation digit, WORM cartridges
+			# a letter.
+			case ${BASH_REMATCH[2]} in
+			T)	DENSITY="LTO3" ;;
+			U)	DENSITY="LTO4" ;;
+			V)	DENSITY="LTO5" ;;
+			W)	DENSITY="LTO6" ;;
+			X)	DENSITY="LTO7" ;;
+			Y)	DENSITY="LTO8" ;;
+			Z)	DENSITY="LTO9" ;;
+			*)	DENSITY="LTO${BASH_REMATCH[2]}" ;;
+			esac
 		elif [ ${BASH_REMATCH[1]} = 'D' ]; then
 			if [ ${BASH_REMATCH[2]} = '7' ]; then
 				DENSITY="DLT4"
