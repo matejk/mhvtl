@@ -160,6 +160,31 @@ struct mode {
  */
 #define MAM_COHERENCY_LEN 0x46
 
+/* Host vendor specific attributes (0x1400 - 0x17ff).
+ *
+ * Everything else in the MAM is described by the static attribute table, which
+ * binds each attribute id to a field of struct MAM. This range belongs to the
+ * application: it may store any attribute it likes there, so the attributes
+ * have to be kept as data rather than as fields. Archive applications use it to
+ * label a cartridge - a barcode, a volume uuid, an initialisation timestamp -
+ * and expect to read the label back after a reload.
+ *
+ * They are held in a fixed size array so that struct MAM remains a plain value
+ * type: resp_write_attribute() takes a copy of the whole struct to roll back a
+ * write that turns out to be invalid, which a pointer-based store would break.
+ */
+#define MAM_VENDOR_ATTR_FIRST	  0x1400
+#define MAM_VENDOR_ATTR_LAST	  0x17ff
+#define MAM_VENDOR_ATTR_MAX		  32
+#define MAM_VENDOR_ATTR_VALUE_LEN 256
+
+struct MAM_vendor_attr {
+	uint16_t attribute_id;
+	uint16_t length; /* 0 => unused slot */
+	uint8_t	 format;
+	uint8_t	 value[MAM_VENDOR_ATTR_VALUE_LEN];
+};
+
 enum MAM_attribute_idx {
 	/* 0x0000 – 0x03ff : Device */
 	MAM_REMAINING_CAPACITY,
@@ -315,6 +340,13 @@ struct MAM {
 	/* 0x1000 - 0x13ff - Medium - Vendor Specific */
 	/* 0x1400 - 0x17ff -  Host  - Vendor Specific */
 	uint8_t VolumeLock;
+
+	/* Attributes in the host vendor specific range that the static table does
+	 * not describe. Kept sorted by attribute id, as READ ATTRIBUTE has to
+	 * report attributes in ascending order.
+	 */
+	uint16_t			   vendor_attr_count;
+	struct MAM_vendor_attr vendor_attr[MAM_VENDOR_ATTR_MAX];
 
 	/* mhvtl attributes */
 	uint8_t	 record_dirty; /* 0 = Record clean, non-zero umount failed. */
@@ -701,6 +733,11 @@ enum MHVTL_STATE {
 
 int	 get_config(char *buf, conf_file conf, long my_id);
 void init_mam(struct MAM* mamp);
+int mam_vendor_attr_range(uint16_t attribute_id);
+struct MAM_vendor_attr *mam_vendor_attr_find(struct MAM *mamp, uint16_t attribute_id);
+void mam_vendor_attr_remove(struct MAM *mamp, uint16_t attribute_id);
+int mam_vendor_attr_set(struct MAM *mamp, uint16_t attribute_id, uint8_t format,
+						const uint8_t *value, uint16_t length);
 
 int	 check_reset(uint8_t *);
 int	 check_inquiry_data_has_changed(uint8_t *);

@@ -96,7 +96,92 @@ long			   my_id   = 0;
 			.value		  = &(field)};                                        \
 	} while (0)
 
+/* Attributes in the host vendor specific range that the static table does not
+ * describe. See the comment on struct MAM_vendor_attr.
+ */
+int mam_vendor_attr_range(uint16_t attribute_id) {
+	return (attribute_id >= MAM_VENDOR_ATTR_FIRST) &&
+		   (attribute_id <= MAM_VENDOR_ATTR_LAST);
+}
+
+struct MAM_vendor_attr *mam_vendor_attr_find(struct MAM *mamp,
+											 uint16_t	 attribute_id) {
+	uint16_t i;
+
+	for (i = 0; i < mamp->vendor_attr_count; i++)
+		if (mamp->vendor_attr[i].attribute_id == attribute_id)
+			return &mamp->vendor_attr[i];
+
+	return NULL;
+}
+
+/* Drop an attribute, keeping the array sorted and gap free. */
+void mam_vendor_attr_remove(struct MAM *mamp, uint16_t attribute_id) {
+	struct MAM_vendor_attr *attr = mam_vendor_attr_find(mamp, attribute_id);
+	uint16_t				idx;
+
+	if (!attr)
+		return;
+
+	idx = attr - mamp->vendor_attr;
+	memmove(&mamp->vendor_attr[idx], &mamp->vendor_attr[idx + 1],
+			(mamp->vendor_attr_count - idx - 1) * sizeof(*attr));
+	mamp->vendor_attr_count--;
+	memset(&mamp->vendor_attr[mamp->vendor_attr_count], 0, sizeof(*attr));
+}
+
+/* Store or replace an attribute. A zero length removes it, as SSC defines for
+ * a WRITE ATTRIBUTE carrying no value.
+ *
+ * Returns 0 on success, -1 when the value is too long for a slot and -2 when
+ * the medium has no free slot left.
+ */
+int mam_vendor_attr_set(struct MAM *mamp, uint16_t attribute_id, uint8_t format,
+						const uint8_t *value, uint16_t length) {
+	struct MAM_vendor_attr *attr;
+	uint16_t				idx;
+
+	if (!length) {
+		mam_vendor_attr_remove(mamp, attribute_id);
+		return 0;
+	}
+
+	if (length > MAM_VENDOR_ATTR_VALUE_LEN)
+		return -1;
+
+	attr = mam_vendor_attr_find(mamp, attribute_id);
+	if (!attr) {
+		if (mamp->vendor_attr_count >= MAM_VENDOR_ATTR_MAX)
+			return -2;
+
+		/* Insert in ascending attribute id order */
+		for (idx = 0; idx < mamp->vendor_attr_count; idx++)
+			if (mamp->vendor_attr[idx].attribute_id > attribute_id)
+				break;
+
+		memmove(&mamp->vendor_attr[idx + 1], &mamp->vendor_attr[idx],
+				(mamp->vendor_attr_count - idx) * sizeof(*attr));
+		mamp->vendor_attr_count++;
+		attr = &mamp->vendor_attr[idx];
+	}
+
+	memset(attr, 0, sizeof(*attr));
+	attr->attribute_id = attribute_id;
+	attr->format	   = format;
+	attr->length	   = length;
+	memcpy(attr->value, value, length);
+
+	return 0;
+}
+
 void init_mam(struct MAM *mamp) {
+	/* Host vendor specific attributes describe the medium, so start from an
+	 * empty set: this runs for every load and a cartridge must never inherit
+	 * the labels of the one before it.
+	 */
+	mamp->vendor_attr_count = 0;
+	memset(mamp->vendor_attr, 0, sizeof(mamp->vendor_attr));
+
 	/* Device (0x0000 - 0x03ff) */
 	INIT_MAM_ATTR(0x000, 8, 1, 0, mamp->remaining_capacity, MAM_REMAINING_CAPACITY);
 	INIT_MAM_ATTR(0x001, 8, 1, 0, mamp->max_capacity, MAM_MAX_CAPACITY);

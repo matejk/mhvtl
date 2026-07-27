@@ -444,6 +444,52 @@ static void *mam_attr_value(struct lu_phy_attr *lu, int indx, uint8_t partition,
  *
  * Fill in 'buf' with data and return number of bytes
  */
+/* One attribute of the merged view over the static table and the host vendor
+ * specific store, both sorted by attribute id.
+ */
+struct mam_attr_view {
+	uint16_t					  id;
+	uint16_t					  len;
+	uint8_t						  ro;
+	uint8_t						  format;
+	int							  indx;	  /* static table position, vendor == NULL */
+	const struct MAM_vendor_attr *vendor; /* NULL when from the static table */
+};
+
+/* Yield the next attribute in ascending id order and advance the cursor.
+ * Returns 0 when both sequences are exhausted.
+ */
+static int next_mam_attribute(int *indx, uint16_t *vndx,
+							  struct mam_attr_view *out) {
+	const struct MAM_vendor_attr *vattr =
+		(*vndx < mam.vendor_attr_count) ? &mam.vendor_attr[*vndx] : NULL;
+	int use_vendor;
+
+	if (!mam.attributes[*indx].length && !vattr)
+		return 0;
+
+	use_vendor = vattr && (!mam.attributes[*indx].length ||
+						   vattr->attribute_id < mam.attributes[*indx].attribute_id);
+	if (use_vendor) {
+		out->id		= vattr->attribute_id;
+		out->len	= vattr->length;
+		out->ro		= 0;
+		out->format = vattr->format;
+		out->vendor = vattr;
+		(*vndx)++;
+	}
+	else {
+		out->id		= mam.attributes[*indx].attribute_id;
+		out->len	= mam.attributes[*indx].length;
+		out->ro		= mam.attributes[*indx].read_only;
+		out->format = mam.attributes[*indx].format;
+		out->indx	= *indx;
+		out->vendor = NULL;
+		(*indx)++;
+	}
+	return 1;
+}
+
 int resp_read_attribute(struct scsi_cmd *cmd) {
 	uint8_t		*cdb	  = cmd->scb;
 	uint8_t		*buf	  = cmd->dbuf_p->data;
@@ -453,6 +499,8 @@ int resp_read_attribute(struct scsi_cmd *cmd) {
 	uint32_t	 ret_val	= 4; /* Available data length */
 	unsigned int byte_index = 4;
 	int			 indx, found_attribute;
+	uint16_t	 vndx;
+	struct mam_attr_view attr_view;
 	struct s_sd	 sd;
 	uint8_t		 scratch[8]; /* Holds values which are computed per partition */
 
@@ -463,30 +511,36 @@ int resp_read_attribute(struct scsi_cmd *cmd) {
 
 	memset_ssc_buf(cmd, alloc_len); /* Clear memory */
 
+	/* The static table and the host vendor specific attributes are two sorted
+	 * sequences whose id ranges overlap, so both branches below walk them
+	 * through next_mam_attribute(): SSC requires READ ATTRIBUTE to report
+	 * attributes in ascending attribute id order.
+	 */
+	indx = 0;
+	vndx = 0;
 	if (cdb[1] == 0) {
 		/* Attribute Values */
-		for (indx = found_attribute = 0; mam.attributes[indx].length; indx++) {
-			if (attrib == mam.attributes[indx].attribute_id)
+		found_attribute = 0;
+		while (next_mam_attribute(&indx, &vndx, &attr_view)) {
+			if (attrib == attr_view.id)
 				found_attribute = 1;
 
 			if (found_attribute) {
 				/* calculate available data length */
-				ret_val += mam.attributes[indx].length + 5;
+				ret_val += attr_view.len + 5;
 				if (ret_val <= alloc_len) {
 					/* add it to output */
-					MHVTL_DBG(2, "Attribute : %02x %02x %02x %02x %02x %02x\n",
-							  buf[byte_index], buf[byte_index + 1],
-							  buf[byte_index + 2], buf[byte_index + 3],
-							  buf[byte_index + 4], buf[byte_index + 5]);
-					buf[byte_index++] = mam.attributes[indx].attribute_id >> 8;
-					buf[byte_index++] = mam.attributes[indx].attribute_id;
-					buf[byte_index++] = (mam.attributes[indx].read_only << 7) | mam.attributes[indx].format;
-					buf[byte_index++] = mam.attributes[indx].length >> 8;
-					buf[byte_index++] = mam.attributes[indx].length;
+					buf[byte_index++] = attr_view.id >> 8;
+					buf[byte_index++] = attr_view.id;
+					buf[byte_index++] = (attr_view.ro << 7) | attr_view.format;
+					buf[byte_index++] = attr_view.len >> 8;
+					buf[byte_index++] = attr_view.len;
 					memcpy(&buf[byte_index],
-						   mam_attr_value(cmd->lu, indx, cdb[7], scratch),
-						   mam.attributes[indx].length);
-					byte_index += mam.attributes[indx].length;
+						   attr_view.vendor
+							   ? attr_view.vendor->value
+							   : mam_attr_value(cmd->lu, attr_view.indx, cdb[7], scratch),
+						   attr_view.len);
+					byte_index += attr_view.len;
 				}
 			}
 		}
@@ -500,13 +554,13 @@ int resp_read_attribute(struct scsi_cmd *cmd) {
 		}
 	} else {
 		/* Attribute List */
-		for (indx = found_attribute = 0; mam.attributes[indx].length; indx++) {
+		while (next_mam_attribute(&indx, &vndx, &attr_view)) {
 			/* calculate available data length */
 			ret_val += 2;
 			if (ret_val <= alloc_len) {
 				/* add it to output */
-				buf[byte_index++] = mam.attributes[indx].attribute_id >> 8;
-				buf[byte_index++] = mam.attributes[indx].attribute_id;
+				buf[byte_index++] = attr_view.id >> 8;
+				buf[byte_index++] = attr_view.id;
 			}
 		}
 	}
@@ -548,6 +602,14 @@ int resp_write_attribute(struct scsi_cmd *cmd) {
 	memcpy(&mam_backup, mamp, sizeof(struct MAM)); /* In case of error, keep former state of mam */
 
 	for (byte_index = 4; byte_index < alloc_len;) {
+		/* Each entry carries at least the five byte header */
+		if (byte_index + 5 > alloc_len) {
+			memcpy(mamp, &mam_backup, sizeof(struct MAM));
+			sd.byte0		 = SKSV;
+			sd.field_pointer = byte_index;
+			sam_illegal_request(E_PARAMETER_LIST_LENGTH_ERR, &sd, sam_stat);
+			return 0;
+		}
 		attrib = get_unaligned_be16(&buf[byte_index]);
 
 		for (indx = found_attribute = 0; mam.attributes[indx].length; indx++) {
@@ -555,6 +617,14 @@ int resp_write_attribute(struct scsi_cmd *cmd) {
 				found_attribute	 = 1;
 				attribute_length = get_unaligned_be16(&buf[byte_index + 3]);
 				byte_index += 5;		 /* positioning to the actual value */
+				if (byte_index + attribute_length > alloc_len) {
+					memcpy(mamp, &mam_backup, sizeof(struct MAM));
+					sd.byte0		 = SKSV;
+					sd.field_pointer = byte_index - 2;
+					sam_illegal_request(E_PARAMETER_LIST_LENGTH_ERR, &sd,
+										sam_stat);
+					return 0;
+				}
 				if ((attrib == 0x408) && /* Attribute == Medium Type */
 					(attribute_length == 1) &&
 					(buf[byte_index] == 0x80)) {
@@ -591,6 +661,41 @@ int resp_write_attribute(struct scsi_cmd *cmd) {
 				sd.field_pointer = indx;
 			}
 		}
+		if (!found_attribute && mam_vendor_attr_range(attrib)) {
+			/* Not described by the static table, but the application owns
+			 * this range and may store what it likes there.
+			 */
+			const uint8_t format = buf[byte_index + 2] & 0x03;
+			int			  res;
+
+			attribute_length = get_unaligned_be16(&buf[byte_index + 3]);
+			byte_index += 5;
+			if (byte_index + attribute_length > alloc_len) {
+				memcpy(mamp, &mam_backup, sizeof(struct MAM));
+				sd.byte0		 = SKSV;
+				sd.field_pointer = byte_index - 2;
+				sam_illegal_request(E_PARAMETER_LIST_LENGTH_ERR, &sd, sam_stat);
+				return 0;
+			}
+
+			res = mam_vendor_attr_set(mamp, attrib, format, &buf[byte_index],
+									  attribute_length);
+			if (res) {
+				MHVTL_LOG("Cannot store vendor attribute 0x%04x, length %d: %s",
+						  attrib, attribute_length,
+						  (res == -1) ? "value too long" : "no space in MAM");
+				memcpy(mamp, &mam_backup, sizeof(struct MAM));
+				sd.byte0		 = SKSV;
+				sd.field_pointer = byte_index - 5;
+				sam_illegal_request(E_INVALID_FIELD_IN_PARMS, &sd, sam_stat);
+				return 0;
+			}
+			MHVTL_DBG(2, "Stored vendor attribute 0x%04x, length %d",
+					  attrib, attribute_length);
+			byte_index += attribute_length;
+			found_attribute = 1;
+		}
+
 		if (!found_attribute) {
 			memcpy(mamp, &mam_backup, sizeof(struct MAM));
 			sd.byte0 = SKSV;
