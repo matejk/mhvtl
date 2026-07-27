@@ -1922,7 +1922,6 @@ static int init_lu(struct lu_phy_attr *lu, unsigned minor, struct mhvtl_ctl *ctl
 	char			 device_conf[CONF_FILE_SZ];
 	FILE			*conf;
 	char			*b; /* Read from file into this buffer */
-	char			*s; /* Somewhere for sscanf to store results */
 	int				 indx;
 	struct mhvtl_ctl tmpctl;
 	int				 found = 0;
@@ -1971,11 +1970,6 @@ static int init_lu(struct lu_phy_attr *lu, unsigned minor, struct mhvtl_ctl *ctl
 		perror("Can not open config file");
 		exit(1);
 	}
-	s = zalloc(MALLOC_SZ);
-	if (!s) {
-		perror("Could not allocate memory");
-		exit(1);
-	}
 	b = zalloc(MALLOC_SZ);
 	if (!b) {
 		perror("Could not allocate memory");
@@ -2003,46 +1997,50 @@ static int init_lu(struct lu_phy_attr *lu, unsigned minor, struct mhvtl_ctl *ctl
 		if (indx == minor) {
 			unsigned int c, d, e, f, g, h, j, k;
 			int			 i;
+			char		*v;
 
-			memset(s, 0x20, MALLOC_SZ);
-
-			if (sscanf(b, " Unit serial number: %s", s)) {
-				checkstrlen(s, SCSI_SN_LEN, linecount);
-				snprintf(lu->lu_serial_no, sizeof(lu->lu_serial_no), "%-10s", s);
+			v = conf_value(b, "Unit serial number");
+			if (v) {
+				conf_clamp_string(v, SCSI_SN_LEN, linecount);
+				snprintf(lu->lu_serial_no, sizeof(lu->lu_serial_no), "%-10s", v);
 			}
-			if (sscanf(b, " Vendor identification: %s", s)) {
-				checkstrlen(s, VENDOR_ID_LEN, linecount);
-				snprintf(lu->vendor_id, VENDOR_ID_LEN + 1, "%-8s", s);
-				snprintf(&lu->inquiry[8], VENDOR_ID_LEN + 1, "%-8s", s);
+			v = conf_value(b, "Vendor identification");
+			if (v) {
+				conf_clamp_string(v, VENDOR_ID_LEN, linecount);
+				snprintf(lu->vendor_id, VENDOR_ID_LEN + 1, "%-8s", v);
+				snprintf(&lu->inquiry[8], VENDOR_ID_LEN + 1, "%-8s", v);
 			}
-			if (sscanf(b, " Product identification: %16c", s)) {
-				/* sscanf does not NULL terminate */
-				/* 25 is len of ' Product identification: ' */
-				s[strlen(b) - 25] = '\0';
-				checkstrlen(s, PRODUCT_ID_LEN, linecount);
-				snprintf(lu->product_id, PRODUCT_ID_LEN + 1, "%-16s", s);
-				snprintf(&lu->inquiry[16], PRODUCT_ID_LEN + 1, "%-16s", s);
+			v = conf_value(b, "Product identification");
+			if (v) {
+				conf_clamp_string(v, PRODUCT_ID_LEN, linecount);
+				snprintf(lu->product_id, PRODUCT_ID_LEN + 1, "%-16s", v);
+				snprintf(&lu->inquiry[16], PRODUCT_ID_LEN + 1, "%-16s", v);
 			}
-			if (sscanf(b, " Product revision level: %s", s)) {
-				checkstrlen(s, PRODUCT_REV_LEN, linecount);
-				snprintf(&lu->inquiry[32], PRODUCT_REV_LEN + 1, "%-4s", s);
+			v = conf_value(b, "Product revision level");
+			if (v) {
+				conf_clamp_string(v, PRODUCT_REV_LEN, linecount);
+				snprintf(&lu->inquiry[32], PRODUCT_REV_LEN + 1, "%-4s", v);
 			}
-			if (sscanf(b, " Library ID: %d", &library_id)) {
+			v = conf_value(b, "Library ID");
+			if (v && sscanf(v, "%d", &library_id)) {
 				MHVTL_DBG(2, "Library ID: %d", library_id);
 			}
-			if (sscanf(b, " LBP RSCRC BE: %d", &lbp_rscrc_be)) {
+			v = conf_value(b, "LBP RSCRC BE");
+			if (v && sscanf(v, "%d", &lbp_rscrc_be)) {
 				MHVTL_DBG(2, "Logical Block Protection RSCRC: %d", lbp_rscrc_be);
 			}
-			if (sscanf(b, " Backoff: %d", &i)) {
+			v = conf_value(b, "Backoff");
+			if (v && sscanf(v, "%d", &i)) {
 				if ((i > 1) && (i < 10000)) {
 					MHVTL_DBG(1, "Backoff value: %d", i);
 					backoff = i;
 				}
 			}
-			if (sscanf(b, " Compression type: %s", s)) {
-				if (!strncasecmp(s, "lzo", 3))
+			v = conf_value(b, "Compression type");
+			if (v) {
+				if (!strncasecmp(v, "lzo", 3))
 					lu_ssc.compressionType = LZO;
-				if (!strncasecmp(s, "zlib", 4))
+				if (!strncasecmp(v, "zlib", 4))
 					lu_ssc.compressionType = ZLIB;
 				MHVTL_DBG(2, "Compression set to %s",
 						  (lu_ssc.compressionType == LZO) ? "LZO" : "ZLIB");
@@ -2057,8 +2055,9 @@ static int init_lu(struct lu_phy_attr *lu, unsigned minor, struct mhvtl_ctl *ctl
 				else
 					lu_ssc.configCompressionFactor = 0;
 			}
-			if (sscanf(b, " fifo: %s", s))
-				process_fifoname(lu, s, 0);
+			v = conf_value(b, "fifo");
+			if (v)
+				process_fifoname(lu, v, 0);
 			i = sscanf(b,
 					   " NAA: %02x:%02x:%02x:%02x:%02x:%02x:%02x:%02x",
 					   &c, &d, &e, &f, &g, &h, &j, &k);
@@ -2086,7 +2085,6 @@ static int init_lu(struct lu_phy_attr *lu, unsigned minor, struct mhvtl_ctl *ctl
 	}
 	fclose(conf);
 	free(b);
-	free(s);
 
 	if (found && !lu->inquiry[32]) {
 		char *v;

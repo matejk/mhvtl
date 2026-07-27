@@ -722,6 +722,8 @@ int	  open_fifo(FILE **fifo_fd, char *fifoname);
 void  status_change(FILE *fifo_fd, int current_status, int my_id, char **msg);
 
 char *readline(char *s, int len, FILE *f);
+char *conf_value(char *line, const char *field);
+void conf_clamp_string(char *s, unsigned int len, int lineno);
 void  blank_fill(uint8_t *dest, char *src, int len);
 
 void log_opcode(char *opcode, struct scsi_cmd *cmd);

@@ -1193,6 +1193,83 @@ char *readline(char *buf, int len, FILE *s) {
 	return ret;
 }
 
+/* Return the value of ' <field>: <value>' from a config file line, or NULL when
+ * the line holds a different field.
+ *
+ * The value runs to the end of the line because it may contain spaces - real
+ * INQUIRY strings such as "HH LTO Gen 8" do - so leading and trailing blanks
+ * are trimmed instead, along with any trailing comment. 'line' is modified in
+ * place to cut those; the returned pointer points into it.
+ */
+char *conf_value(char *line, const char *field) {
+	const char *f = field;
+	char	   *value, *end, *c;
+
+	while (*line == ' ' || *line == '\t')
+		line++;
+
+	/* A space in the field name matches a run of blanks, so tabs or doubled
+	 * spaces in a hand-written file still parse. Unlike the sscanf formats
+	 * this replaces, at least one blank is required.
+	 */
+	while (*f) {
+		if (*f == ' ') {
+			if (*line != ' ' && *line != '\t')
+				return NULL;
+			while (*line == ' ' || *line == '\t')
+				line++;
+			f++;
+		}
+		else if (*line == *f) {
+			line++;
+			f++;
+		}
+		else {
+			return NULL;
+		}
+	}
+
+	value = line;
+	if (*value != ':')
+		return NULL;
+	value++;
+
+	while (*value == ' ' || *value == '\t')
+		value++;
+
+	/* A '#' after a blank starts a comment. Requiring the blank keeps '#'
+	 * usable inside a value.
+	 */
+	for (c = value; c[0] && c[1]; c++)
+		if ((c[0] == ' ' || c[0] == '\t') && c[1] == '#') {
+			c[0] = '\0';
+			break;
+		}
+
+	end = value + strlen(value);
+	while (end > value && (end[-1] == ' ' || end[-1] == '\t' ||
+						   end[-1] == '\r' || end[-1] == '\n'))
+		end--;
+	*end = '\0';
+
+	/* A field with no value carries nothing to apply, so it is ignored */
+	if (end == value)
+		return NULL;
+
+	return value;
+}
+
+/* INQUIRY strings have fixed widths, so a real device cannot carry a longer
+ * value: truncate with a warning rather than refuse to start.
+ */
+void conf_clamp_string(char *s, unsigned int len, int lineno) {
+	if (strlen(s) > len) {
+		MHVTL_LOG("Line %d: value truncated to %u characters: %s",
+				  lineno, len, s);
+		s[len] = '\0';
+	}
+}
+
 /* Copy bytes from 'src' to 'dest, blank-filling to length 'len'.  There will
  * not be a NULL byte at the end.
  */
