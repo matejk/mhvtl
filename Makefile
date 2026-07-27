@@ -52,7 +52,7 @@ install: all
 	[ -d $(DESTDIR)$(MHVTL_HOME_PATH) ] || mkdir -p $(DESTDIR)$(MHVTL_HOME_PATH)
 	$(MAKE) -C usr install
 	$(MAKE) -C scripts install
-	$(MAKE) -i -C etc install
+	$(MAKE) -C etc install
 	$(MAKE) -C man install
 	$(MAKE) -C kernel install
 ifeq ($(ROOTUID),YES)
@@ -70,7 +70,7 @@ tape: # now ensure VTL media is setup
 uninstall:
 	$(MAKE) -C usr uninstall
 	$(MAKE) -C scripts uninstall
-	$(MAKE) -i -C etc uninstall
+	$(MAKE) -C etc uninstall
 	$(MAKE) -C man uninstall
 	$(MAKE) -C kernel uninstall
 ifeq ($(ROOTUID),YES)

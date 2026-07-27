@@ -218,19 +218,20 @@ install: all \
 	ln $(DESTDIR)$(PREFIX)/bin/dump_tape $(DESTDIR)$(PREFIX)/bin/preload_tape
 	[ -d $(DESTDIR)$(SYSTEMD_GENERATOR_DIR) ] || install -d -m 755 $(DESTDIR)$(SYSTEMD_GENERATOR_DIR)
 	install -m 755 bin/mhvtl-device-conf-generator $(DESTDIR)$(SYSTEMD_GENERATOR_DIR)/
-	restorecon -R -v  $(DESTDIR)$(SYSTEMD_GENERATOR_DIR)
+	$(call RESTORECON_TREE,$(SYSTEMD_GENERATOR_DIR))
 ifeq ($(ROOTUID),YES)
-	ldconfig 
+	ldconfig
 endif
 
 .PHONY: uninstall
 uninstall:
 	rm -f $(addprefix $(DESTDIR)$(PREFIX)/,$(BINARIES) $(GENERATED_FILES)) \
+		  $(DESTDIR)$(PREFIX)/bin/preload_tape \
 		  $(addprefix $(DESTDIR)$(LIBDIR)/,$(LIBRARIES)) \
 		  $(DESTDIR)$(SYSTEMD_GENERATOR_DIR)/mhvtl-device-conf-generator
-	restorecon -R -v  $(DESTDIR)$(SYSTEMD_GENERATOR_DIR)
+	$(call RESTORECON_TREE,$(SYSTEMD_GENERATOR_DIR))
 ifeq ($(ROOTUID),YES)
-	ldconfig 
+	ldconfig
 endif	
 
 .PHONY:tar

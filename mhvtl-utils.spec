@@ -94,6 +94,9 @@ make MHVTL_HOME_PATH=%{mhvtl_home_dir} VERSION=%{version} EXTRAVERSION=%{minor} 
 	MHVTL_HOME_PATH=%{mhvtl_home_dir} VERSION=%{version} EXTRAVERSION=%{minor} LIBDIR=%{_libdir} \
 	SYSTEMD_GENERATOR_DIR=%{_systemdgeneratordir} \
 	SYSTEMD_SERVICE_DIR=%{_unitdir}
+# The kernel module is built out of band from the packaged mhvtl_kernel.tgz;
+# discard the module the recursive install staged for the build host's kernel.
+%{__rm} -rf %{buildroot}/lib/modules
 install -d -m 755 %{buildroot}%{_sbindir}
 ln -s %{_sbindir}/service %{buildroot}/%{_sbindir}/rc%{name}
 install -d -m 755 %{buildroot}/var/lib/%{name}
