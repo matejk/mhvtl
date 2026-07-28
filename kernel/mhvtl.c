@@ -1008,6 +1008,37 @@ static int mhvtl_stop_queued_cmnd(struct scsi_cmnd *SCpnt) {
 	return found;
 }
 
+/* Complete every command still outstanding on this logical unit.
+ *
+ * A removal that simply unlinks the unit strands its commands: the daemon can
+ * no longer be asked for a response, and the expiry timer looks its command up
+ * by walking lu_list, so it no longer finds it either. Nothing then completes
+ * the scsi_cmnd and scsi_remove_device() waits for the queue to drain for ever,
+ * in uninterruptible sleep.
+ */
+static void mhvtl_fail_queued_cmnds(struct mhvtl_lu_info *lu) {
+	struct mhvtl_queued_cmd *sqcp, *n;
+	unsigned long			 iflags;
+	LIST_HEAD(dead);
+
+	spin_lock_irqsave(&lu->cmd_list_lock, iflags);
+	list_for_each_entry_safe(sqcp, n, &lu->cmd_list, queued_sibling) {
+		sqcp->state = CMD_STATE_FREE;
+		list_move(&sqcp->queued_sibling, &dead);
+	}
+	spin_unlock_irqrestore(&lu->cmd_list_lock, iflags);
+
+	list_for_each_entry_safe(sqcp, n, &dead, queued_sibling) {
+		timer_delete_sync(&sqcp->cmnd_timer);
+		if (sqcp->done_funct && sqcp->a_cmnd) {
+			sqcp->a_cmnd->result = DID_NO_CONNECT << 16;
+			sqcp->done_funct(sqcp->a_cmnd);
+		}
+		list_del(&sqcp->queued_sibling);
+		kfree(sqcp);
+	}
+}
+
 /* Deletes (stops) timers of all queued commands */
 static void mhvtl_stop_all_queued(void) {
 	unsigned long			 iflags;
@@ -1555,6 +1586,11 @@ static int mhvtl_driver_remove(struct device *dev) {
 		lu = list_entry(lh, struct mhvtl_lu_info,
 						lu_sibling);
 		list_del(&lu->lu_sibling);
+		/* Leaving the slot occupied would make this minor unusable for
+		 * the rest of the module's life.
+		 */
+		if (lu->minor < DEF_MAX_MINOR_NO && devp[lu->minor] == lu)
+			devp[lu->minor] = NULL;
 		kfree(lu);
 	}
 
@@ -1742,6 +1778,11 @@ static int mhvtl_remove_lu(unsigned int minor, char __user *arg) {
 		if ((lu->channel == ctl.channel) && (lu->target == ctl.id) &&
 			(lu->lun == ctl.lun)) {
 			pr_debug("line %d found matching lu\n", __LINE__);
+			/* Fail anything still outstanding while the unit is still
+			 * reachable, so scsi_remove_device() below has a queue that
+			 * can actually drain.
+			 */
+			mhvtl_fail_queued_cmnds(lu);
 			/* _init so the later list_del_init() in sdev_destroy(),
 			 * reached through scsi_remove_device() below, does not walk
 			 * poisoned pointers.
@@ -1749,9 +1790,15 @@ static int mhvtl_remove_lu(unsigned int minor, char __user *arg) {
 			list_del_init(&lu->lu_sibling);
 			devp[lu->minor] = NULL;
 
+			/* Ownership rule for the reference __scsi_add_device()
+			 * returned: whoever clears lu->sdev under sdev_lock owns the
+			 * matching scsi_device_put(). Clearing it here stops the
+			 * release path putting the same reference a second time.
+			 */
 			spin_lock(&lu->sdev_lock);
 			if (lu->sdev) {
-				baksdev = lu->sdev;
+				baksdev	 = lu->sdev;
+				lu->sdev = NULL;
 				spin_unlock(&lu->sdev_lock);
 				break;
 			}
@@ -1786,7 +1833,8 @@ static long mhvtl_c_ioctl(struct file *file, unsigned int cmd, unsigned long arg
 	}
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(2, 6, 39)
-	mutex_lock(&ioctl_mutex);
+	if (mutex_lock_interruptible(&ioctl_mutex))
+		return -ERESTARTSYS;
 #else
 	lock_kernel();
 #endif
@@ -1893,6 +1941,8 @@ static int mhvtl_release(struct inode *inode, struct file *filp) {
 		pr_debug("minor %u closed with its lu still registered"
 				 " - removing it\n",
 				 minor);
+		if (lu)
+			mhvtl_fail_queued_cmnds(lu);
 		scsi_remove_device(sdev);
 		scsi_device_put(sdev);
 	}
