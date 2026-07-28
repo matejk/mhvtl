@@ -1586,9 +1586,12 @@ int main(int argc, char *argv[]) {
 			break;
 		case 'q':
 			my_id = atoi(optarg);
-			if ((my_id < 0) || (my_id > MAXPRIOR)) {
+			/* The queue id becomes the char device minor, and the kernel
+			 * module indexes a MAXPRIOR-entry array with it.
+			 */
+			if ((my_id < 0) || (my_id >= MAXPRIOR)) {
 				fprintf(stderr, "error: queue ID out of range [1..%u]\n",
-						MAXPRIOR);
+						MAXPRIOR - 1);
 				usage(progname);
 				exit(1);
 			}
