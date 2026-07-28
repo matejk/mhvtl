@@ -844,6 +844,21 @@ static int rsoc_service_actions(struct lu_phy_attr *lu, uint8_t op,
 		for (a = 0; a <= 6; a++) /* REGISTER to REGISTER AND IGNORE */
 			sa[n++] = a;
 		break;
+	case READ_POSITION:
+		if (lu->ptype == TYPE_TAPE) {
+			sa[n++] = 0x00; /* short form - block id */
+			sa[n++] = 0x01; /* short form - vendor specific */
+			sa[n++] = 0x06; /* long form */
+			sa[n++] = 0x08; /* extended form */
+		}
+		break;
+	case READ_ATTRIBUTE:
+		if (lu->ptype == TYPE_TAPE) {
+			sa[n++] = 0x00; /* attribute values */
+			sa[n++] = 0x01; /* attribute list */
+			sa[n++] = 0x03; /* partition list */
+		}
+		break;
 	case 0xa3: /* MAINTENANCE IN */
 		sa[n++] = REPORT_SUPPORTED_OPCODES;
 		if (lu->ptype == TYPE_TAPE)
