@@ -27,22 +27,29 @@
 #include <signal.h>
 #include "logging.h"
 
-static pid_t pid;
-static int	 timedout;
+static volatile sig_atomic_t pid;
+static volatile sig_atomic_t timedout;
 
 void alarm_timeout(int sig) {
+	(void)sig;
 	alarm(0);
 	timedout = 1;
+	/* pid is cleared before the child is reaped, so this cannot signal a
+	 * pid the system has already recycled.
+	 */
 	if (pid)
-		kill(pid, 9);
+		kill((pid_t)pid, SIGKILL);
 }
 
 int run_command(char *command, int timeout) {
-	pid = fork();
-	if (!pid) {
+	pid_t child = fork();
+
+	pid = child;
+	if (!child) {
 		/* child */
 		execlp("/bin/sh", "/bin/sh", "-c", command, (char *)NULL);
-	} else if (pid < 0) {
+		_exit(127); /* execlp only returns on failure */
+	} else if (child < 0) {
 		/* TODO error handling */
 		return -1;
 	} else {
@@ -51,10 +58,11 @@ int run_command(char *command, int timeout) {
 		alarm(timeout);
 		int status;
 
-		while (waitpid(pid, &status, 0) <= 0)
+		while (waitpid(child, &status, 0) <= 0)
 			usleep(1);
 
 		alarm(0);
+		pid = 0;
 
 		if (WIFEXITED(status)) {
 			int res = WEXITSTATUS(status);
