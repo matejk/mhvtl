@@ -1493,6 +1493,40 @@ static int mhvtl_driver_probe(struct device *dev) {
 	return error;
 }
 
+/* Drop the scsi_device reference __scsi_add_device() returned for each LU.
+ * Runs before scsi_remove_host() so the devices can actually be freed.
+ */
+static void mhvtl_put_lu_devices(struct mhvtl_hba_info *mhvtl_hba) {
+	struct mhvtl_lu_info *lu;
+	struct scsi_device	 *sdev;
+	unsigned long		  hba_iflags;
+
+	/* scsi_device_put() can sleep, so it must not run under the list lock,
+	 * and the list must not be walked across a release of it. Claim one
+	 * device per pass instead; each pass clears one lu->sdev, so this
+	 * terminates.
+	 */
+	do {
+		sdev = NULL;
+
+		spin_lock_irqsave(&mhvtl_hba_list_lock, hba_iflags);
+		list_for_each_entry(lu, &mhvtl_hba->lu_list, lu_sibling) {
+			spin_lock(&lu->sdev_lock);
+			if (lu->sdev) {
+				sdev	 = lu->sdev;
+				lu->sdev = NULL;
+			}
+			spin_unlock(&lu->sdev_lock);
+			if (sdev)
+				break;
+		}
+		spin_unlock_irqrestore(&mhvtl_hba_list_lock, hba_iflags);
+
+		if (sdev)
+			scsi_device_put(sdev);
+	} while (sdev);
+}
+
 static int mhvtl_driver_remove(struct device *dev) {
 	struct list_head	  *lh, *lh_sf;
 	struct mhvtl_hba_info *mhvtl_hba;
@@ -1505,8 +1539,18 @@ static int mhvtl_driver_remove(struct device *dev) {
 		return -ENODEV;
 	}
 
+	/* Return the reference __scsi_add_device() handed us for every LU.
+	 * Only the VTL_REMOVE_LU ioctl used to do this, so tearing the adapter
+	 * down any other way left each scsi_device - and through it the host,
+	 * which pins this module - referenced forever, making rmmod impossible.
+	 */
+	mhvtl_put_lu_devices(mhvtl_hba);
+
 	scsi_remove_host(mhvtl_hba->shost);
 
+	/* sdev_destroy() unlinks and frees each LU, so this normally finds an
+	 * empty list; it still runs for LUs that never had a scsi_device.
+	 */
 	list_for_each_safe(lh, lh_sf, &mhvtl_hba->lu_list) {
 		lu = list_entry(lh, struct mhvtl_lu_info,
 						lu_sibling);
@@ -1672,7 +1716,12 @@ static int mhvtl_remove_lu(unsigned int minor, char __user *arg) {
 
 	baksdev = NULL;
 
-	down(&tmp_mutex);
+	/* down() sleeps uninterruptibly, so a teardown that wedges inside
+	 * scsi_remove_device() below would leave every other daemon blocked
+	 * here in D state, unkillable even by SIGKILL.
+	 */
+	if (down_interruptible(&tmp_mutex))
+		return -ERESTARTSYS;
 
 	if (copy_from_user((u8 *)&ctl, (u8 *)arg, sizeof(ctl))) {
 		ret = -EFAULT;
@@ -1693,7 +1742,11 @@ static int mhvtl_remove_lu(unsigned int minor, char __user *arg) {
 		if ((lu->channel == ctl.channel) && (lu->target == ctl.id) &&
 			(lu->lun == ctl.lun)) {
 			pr_debug("line %d found matching lu\n", __LINE__);
-			list_del(&lu->lu_sibling);
+			/* _init so the later list_del_init() in sdev_destroy(),
+			 * reached through scsi_remove_device() below, does not walk
+			 * poisoned pointers.
+			 */
+			list_del_init(&lu->lu_sibling);
 			devp[lu->minor] = NULL;
 
 			spin_lock(&lu->sdev_lock);
@@ -1809,9 +1862,41 @@ static int mhvtl_c_ioctl_bkl(struct inode *inode, struct file *file,
 }
 
 static int mhvtl_release(struct inode *inode, struct file *filp) {
-	unsigned int minor = iminor(inode);
+	unsigned int		  minor = iminor(inode);
+	struct mhvtl_lu_info *lu;
+	struct scsi_device	 *sdev = NULL;
+	unsigned long		  hba_iflags;
 
 	pr_debug("lu for minor %u Release\n", minor);
+
+	if (minor >= DEF_MAX_MINOR_NO)
+		return 0;
+
+	/* The daemon owns its logical unit for as long as it holds this file.
+	 * A daemon that exits without issuing VTL_REMOVE_LU - killed, crashed,
+	 * or left behind by a unit with KillMode=none - would otherwise strand
+	 * the scsi_device reference taken by __scsi_add_device(). That keeps
+	 * the host, and through it this module, referenced forever, so rmmod
+	 * fails and never gets to run the teardown that would release it.
+	 */
+	spin_lock_irqsave(&mhvtl_hba_list_lock, hba_iflags);
+	lu = devp[minor];
+	if (lu) {
+		spin_lock(&lu->sdev_lock);
+		sdev	 = lu->sdev;
+		lu->sdev = NULL;
+		spin_unlock(&lu->sdev_lock);
+	}
+	spin_unlock_irqrestore(&mhvtl_hba_list_lock, hba_iflags);
+
+	if (sdev) {
+		pr_debug("minor %u closed with its lu still registered"
+				 " - removing it\n",
+				 minor);
+		scsi_remove_device(sdev);
+		scsi_device_put(sdev);
+	}
+
 	return 0;
 }
 
