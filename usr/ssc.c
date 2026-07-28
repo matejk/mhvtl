@@ -404,7 +404,6 @@ uint8_t ssc_read_6(struct scsi_cmd *cmd) {
 uint8_t ssc_write_6(struct scsi_cmd *cmd) {
 	declare_ssc_vars;
 
-	int retval = 0;
 	int count;
 	int sz;
 	int k;
@@ -435,9 +434,13 @@ uint8_t ssc_write_6(struct scsi_cmd *cmd) {
 	if (OK_to_write) {
 		update_volume_change_reference(lu_priv, sam_stat);
 
+		/* Each iteration must write the k'th block of the transfer, so the
+		 * offset into the command buffer has to be passed down: writeBlock()
+		 * always reads from cmd->dbuf_p->data, so advancing a local pointer
+		 * here would leave every block a copy of the first.
+		 */
 		for (k = 0; k < count; k++) {
-			retval = writeBlock(cmd, sz);
-			buf += retval;
+			writeBlock(cmd, sz, (uint32_t)k * sz);
 
 			if (*sam_stat)
 				return *sam_stat;
@@ -693,7 +696,10 @@ uint8_t ssc_locate(struct scsi_cmd *cmd) {
 		return SAM_STAT_CHECK_CONDITION;
 	}
 
-	if ((cdb[1] & 0b00000010) && partition_no > mam.num_partitions) {
+	/* Partition numbers are zero based, so num_partitions is one past the
+	 * last valid partition.
+	 */
+	if ((cdb[1] & 0b00000010) && partition_no >= mam.num_partitions) {
 		sam_illegal_request(E_INVALID_FIELD_IN_CDB,
 							NULL, sam_stat);
 		return SAM_STAT_CHECK_CONDITION;

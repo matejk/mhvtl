@@ -285,7 +285,7 @@ struct read_position_information_extended {
 void ssc_personality_module_register(struct ssc_personality_template *pm);
 
 int readBlock(uint8_t *buf, uint32_t request_sz, int sili, int lbp, uint8_t *sam_stat);
-int writeBlock(struct scsi_cmd *cmd, uint32_t request_sz);
+int writeBlock(struct scsi_cmd *cmd, uint32_t request_sz, uint32_t src_offset);
 
 uint8_t ssc_a3_service_action(struct scsi_cmd *cmd);
 uint8_t ssc_a4_service_action(struct scsi_cmd *cmd);

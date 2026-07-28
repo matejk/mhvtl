@@ -812,10 +812,17 @@ static int open_partition(uint8_t partition_number) {
 	char		 pcl_data[1024], pcl_indx[1024], pcl_meta[1024];
 	const char	*pcl_files[3] = {pcl_data, pcl_indx, pcl_meta};
 	struct stat	 data_stat, indx_stat, meta_stat;
-	struct stat *stats[3]	= {&data_stat, &indx_stat, &meta_stat};
-	int			*fd_open[3] = {&datafile[partition_number],
-							   &indxfile[partition_number],
-							   &metafile[partition_number]};
+	struct stat *stats[3] = {&data_stat, &indx_stat, &meta_stat};
+	int			*fd_open[3];
+
+	if (partition_number >= MAX_PARTITIONS) {
+		MHVTL_ERR("Partition %d out of range", partition_number);
+		return 3;
+	}
+
+	fd_open[0] = &datafile[partition_number];
+	fd_open[1] = &indxfile[partition_number];
+	fd_open[2] = &metafile[partition_number];
 
 	snprintf(pcl_data, ARRAY_SIZE(pcl_data), "%s/data.%d", currentPCL, partition_number);
 	snprintf(pcl_indx, ARRAY_SIZE(pcl_indx), "%s/indx.%d", currentPCL, partition_number);
@@ -837,9 +844,14 @@ static int open_partition(uint8_t partition_number) {
 }
 
 static void close_partition(uint8_t partition_number) {
-	int *fd_close[3] = {&datafile[partition_number],
-						&indxfile[partition_number],
-						&metafile[partition_number]};
+	int *fd_close[3];
+
+	if (partition_number >= MAX_PARTITIONS)
+		return;
+
+	fd_close[0] = &datafile[partition_number];
+	fd_close[1] = &indxfile[partition_number];
+	fd_close[2] = &metafile[partition_number];
 	for (int i = 0; i < 3; i++) {
 		if (*fd_close[i] >= 0) {
 			close(*fd_close[i]);
@@ -856,6 +868,11 @@ int change_partition(uint8_t partition_number) {
 	 */
 	uint8_t sam_stat = SAM_STAT_GOOD;
 	int		rc		 = 0;
+
+	if (partition_number >= MAX_PARTITIONS) {
+		MHVTL_ERR("Partition %d out of range", partition_number);
+		return 1;
+	}
 
 	close_partition(c_pos->partition_id);
 	c_pos->partition_id = partition_number;
@@ -1268,10 +1285,17 @@ int load_tape(const char *pcl, uint8_t *sam_stat) {
 		}
 	}
 
-	/* load all partitions */
+	/* Load all partitions. The per-partition state is MAX_PARTITIONS deep,
+	 * so stop there however many data.N files the cartridge directory holds.
+	 */
 	mam.num_partitions = 0;
 	snprintf(path, ARRAY_SIZE(path), "%s/data.%d", currentPCL, mam.num_partitions);
 	while (access(path, F_OK) == 0) {
+		if (mam.num_partitions >= MAX_PARTITIONS) {
+			MHVTL_ERR("pcl %s has more than %d partitions - ignoring the rest",
+					  pcl, MAX_PARTITIONS);
+			break;
+		}
 		c_pos->partition_id = mam.num_partitions;
 		load_partition(pcl, sam_stat, error_check, mam.num_partitions);
 		snprintf(path, ARRAY_SIZE(path), "%s/data.%d", currentPCL, ++mam.num_partitions);
@@ -1326,6 +1350,11 @@ int format_tape(uint8_t *sam_stat) {
 	}
 
 	/* Create <mam.num_partitions> partitions */
+	if (mam.num_partitions > MAX_PARTITIONS) {
+		MHVTL_ERR("num_partitions %d exceeds %d - clamping",
+				  mam.num_partitions, MAX_PARTITIONS);
+		mam.num_partitions = MAX_PARTITIONS;
+	}
 	for (int j = 0; j < mam.num_partitions; ++j) {
 		create_partition(j);
 	}
