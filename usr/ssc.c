@@ -966,6 +966,7 @@ uint8_t ssc_mode_select(struct scsi_cmd *cmd) {
 	int			page_format;
 	int			mselect_6 = 0;
 	int			page;
+	int			subpage;
 	int			offset;
 	int			mode_medium_type;
 	int			mode_dev_spec_param;
@@ -1117,11 +1118,24 @@ uint8_t ssc_mode_select(struct scsi_cmd *cmd) {
 	i += mode_block_descriptor_len;
 	j = 0;
 	while (i < count) {
-		offset	 = 2;
-		page	 = buf[i];
-		page_len = buf[i + 1];
+		/* A page with SPF set carries the subpage code in byte 1 and a two
+		 * byte page length in bytes 2-3; a page_0 page has a one byte
+		 * length in byte 1 and no subpage.
+		 */
+		if (buf[i] & 0x40) {
+			page	 = buf[i] & 0x3f;
+			subpage	 = buf[i + 1];
+			page_len = get_unaligned_be16(&buf[i + 2]);
+			offset	 = 4;
+		} else {
+			page	 = buf[i] & 0x3f;
+			subpage	 = 0;
+			page_len = buf[i + 1];
+			offset	 = 2;
+		}
 
-		MHVTL_DBG(2, " Page: 0x%02x, Page Len: 0x%02x", page, page_len);
+		MHVTL_DBG(2, " Page: 0x%02x, Subpage: 0x%02x, Page Len: 0x%02x",
+				  page, subpage, page_len);
 
 		if (page_len) {
 			MHVTL_DBG(3, " %02d: %02x %02x %02x %02x"
@@ -1167,17 +1181,16 @@ uint8_t ssc_mode_select(struct scsi_cmd *cmd) {
 			break;
 
 		case MODE_DEVICE_CONFIGURATION:
-			/* If this is '01' it's a subpage value
-			 *     i.e. DEVICE CONFIGURATION EXTENSION
-			 * If it's 0x0e, it indicates a page length
-			 * for MODE DEVICE CONFIGURATION
-			 */
-			if (page_len == 0x01) {
+			if (subpage == 0x01) { /* DEVICE CONFIGURATION EXTENSION */
 				if (set_device_configuration_extension(cmd, &buf[i]))
 					return SAM_STAT_CHECK_CONDITION;
-				/* Subpage 1 - override default page length */
-				page_len = get_unaligned_be16(&buf[i + 2]);
-				offset	 = 4;
+			} else if (subpage) {
+				MHVTL_DBG(2, "Device Configuration - Subpage: 0x%02x not supported",
+						  subpage);
+				sd.byte0		 = SKSV;
+				sd.field_pointer = i + 1;
+				sam_illegal_request(E_INVALID_FIELD_IN_CDB, &sd, sam_stat);
+				return SAM_STAT_CHECK_CONDITION;
 			} else if (page_len >= 0x0e) {
 				set_device_configuration(cmd, &buf[i]);
 			} else {
@@ -1191,12 +1204,10 @@ uint8_t ssc_mode_select(struct scsi_cmd *cmd) {
 			break;
 
 		case MODE_CONTROL:
-			if (page_len == 0x0a) {					  /* Control mode page - byte[1] is page len */
+			if (!subpage) {							  /* Control mode page */
 				MHVTL_DBG(3, "Setting Mode Control"); /* Silently accept this worked, but really did not change anything */
 			} else {
-				/* Otherwise, subpage handling - where page len is byte[2] & byte[3] */
-				page_len = get_unaligned_be16(&buf[i + 2]);
-				if (buf[1 + i] == 0xf0) {
+				if (subpage == 0xf0) {
 					/* Logical Block Protection */
 					MHVTL_DBG(2, "Setting LBP method: %d, LBP length: %d, LBP_W: %s, LBP_R: %s",
 							  buf[4 + i], buf[5 + i],
