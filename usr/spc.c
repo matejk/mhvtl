@@ -120,7 +120,10 @@ uint8_t spc_inquiry(struct scsi_cmd *cmd) {
 			data[4] = 0x0;
 			len		= cnt + 4;
 			hex_dump(data, len);
-		} else if (lu->lu_vpd[PCODE_OFFSET(pcode)]) {
+		} else if ((pcode & 0x80) && lu->lu_vpd[PCODE_OFFSET(pcode)]) {
+			/* PCODE_OFFSET() masks off the top bit, so without the test
+			 * above page 0x03 would be answered with page 0x83's data.
+			 */
 			vpd_pg = lu->lu_vpd[PCODE_OFFSET(pcode)];
 
 			MHVTL_DBG(2, "VPD Found page 0x%x", pcode);
@@ -132,6 +135,12 @@ uint8_t spc_inquiry(struct scsi_cmd *cmd) {
 			memcpy(&data[4], vpd_pg->data, vpd_pg->sz);
 			len = vpd_pg->sz + 4;
 			hex_dump(data, len);
+		} else {
+			MHVTL_DBG(2, "VPD page 0x%02x not supported", pcode);
+			sd.byte0		 = SKSV | CD;
+			sd.field_pointer = 2;
+			sam_illegal_request(E_INVALID_FIELD_IN_CDB, &sd, sam_stat);
+			return SAM_STAT_CHECK_CONDITION;
 		}
 	}
 	cmd->dbuf_p->sz = len;

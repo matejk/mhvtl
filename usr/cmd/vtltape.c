@@ -503,7 +503,7 @@ int resp_read_attribute(struct scsi_cmd *cmd) {
 	uint32_t	 alloc_len;
 	uint32_t	 ret_val	= 4; /* Available data length */
 	unsigned int byte_index = 4;
-	int			 indx, found_attribute;
+	int			 indx, found_attribute = 0;
 	uint16_t	 vndx;
 	struct mam_attr_view attr_view;
 	struct s_sd	 sd;
@@ -594,7 +594,7 @@ int resp_write_attribute(struct scsi_cmd *cmd) {
 	uint16_t	 attrib;
 	uint16_t	 attribute_length;
 	unsigned int byte_index = 4;
-	int			 indx, found_attribute;
+	int			 indx, found_attribute = 0;
 	struct s_sd	 sd;
 	uint8_t		 scratch[8];
 
@@ -1086,6 +1086,18 @@ uint8_t resp_spout(struct scsi_cmd *cmd) {
 		return SAM_STAT_CHECK_CONDITION;
 	}
 
+	/* LOGICAL BLOCK ENCRYPTION KEY LENGTH is 0000h or 0020h for key format
+	 * 00h; anything longer would run off the end of the key field.
+	 */
+	if (get_unaligned_be16(&buf[18]) > ENCR_KEY_MAX_LEN) {
+		MHVTL_DBG(1, "Key length %d exceeds %d",
+				  get_unaligned_be16(&buf[18]), ENCR_KEY_MAX_LEN);
+		sd.byte0		 = SKSV;
+		sd.field_pointer = 18;
+		sam_illegal_request(E_INVALID_FIELD_IN_PARMS, &sd, sam_stat);
+		return SAM_STAT_CHECK_CONDITION;
+	}
+
 	lu_ssc.KEY_INSTANCE_COUNTER++;
 	lu_ssc.ENCRYPT_MODE = buf[6];
 	lu_ssc.DECRYPT_MODE = buf[7];
@@ -1102,15 +1114,26 @@ uint8_t resp_spout(struct scsi_cmd *cmd) {
 			  UKAD_LENGTH, AKAD_LENGTH);
 
 	if (cmd->dbuf_p->sz > (19 + KEY_LENGTH + 4)) {
+		uint16_t kad_len = get_unaligned_be16(&buf[22 + KEY_LENGTH]);
+
+		/* Key associated data goes into fixed size fields as well */
+		if (kad_len > ENCR_KEY_MAX_LEN) {
+			MHVTL_DBG(1, "KAD length %d exceeds %d", kad_len, ENCR_KEY_MAX_LEN);
+			sd.byte0		 = SKSV;
+			sd.field_pointer = 22 + KEY_LENGTH;
+			sam_illegal_request(E_INVALID_FIELD_IN_PARMS, &sd, sam_stat);
+			return SAM_STAT_CHECK_CONDITION;
+		}
+
 		if (buf[20 + KEY_LENGTH] == 0x00) {
 			MHVTL_DBG(2, "Unauthenticated Key Associated Data (UKAD) provided");
-			UKAD_LENGTH = get_unaligned_be16(&buf[22 + KEY_LENGTH]);
+			UKAD_LENGTH = kad_len;
 			for (count = 0; count < UKAD_LENGTH; ++count) {
 				UKAD[count] = buf[24 + KEY_LENGTH + count];
 			}
 		} else if (buf[20 + KEY_LENGTH] == 0x01) {
 			MHVTL_DBG(2, "Authenticated Key Associated Data (AKAD) provided");
-			AKAD_LENGTH = get_unaligned_be16(&buf[22 + KEY_LENGTH]);
+			AKAD_LENGTH = kad_len;
 			for (count = 0; count < AKAD_LENGTH; ++count) {
 				AKAD[count] = buf[24 + KEY_LENGTH + count];
 			}

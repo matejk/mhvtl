@@ -269,14 +269,17 @@ int add_mode_control_extension(struct lu_phy_attr *lu) {
 	if (!mp)
 		return -ENOMEM;
 
-	mp->pcodePointer[0] = pcode;
+	/* Subpage format: SPF set in byte 0, subpage code in byte 1, two byte
+	 * page length in bytes 2-3.
+	 */
+	mp->pcodePointer[0] = pcode | 0x40;
 	mp->pcodePointer[1] = subpcode;
-	put_unaligned_be16(size - sizeof(mp->pcodePointer[0]) - sizeof(mp->pcodePointer[1]),
-					   &mp->pcodePointer[2]);
+	put_unaligned_be16(size - 4, &mp->pcodePointer[2]);
 
-	/* And copy pcode/size into bitmap structure */
-	mp->pcodePointerBitMap[0] = mp->pcodePointer[1];
-	mp->pcodePointerBitMap[1] = mp->pcodePointer[2];
+	/* And copy the header into the bitmap structure */
+	mp->pcodePointerBitMap[0] = mp->pcodePointer[0];
+	mp->pcodePointerBitMap[1] = mp->pcodePointer[1];
+	put_unaligned_be16(size - 4, &mp->pcodePointerBitMap[2]);
 
 	mp->description = mode_control_extension;
 
@@ -309,14 +312,17 @@ int add_mode_control_data_protection(struct lu_phy_attr *lu) {
 	MHVTL_DBG(3, "Added mode page %s (%02x/%02x)",
 			  mode_control_extension, pcode, subpcode);
 
-	mp->pcodePointer[0] = pcode;
+	/* Subpage format: SPF set in byte 0, subpage code in byte 1, two byte
+	 * page length in bytes 2-3.
+	 */
+	mp->pcodePointer[0] = pcode | 0x40;
 	mp->pcodePointer[1] = subpcode;
-	put_unaligned_be16(size - sizeof(mp->pcodePointer[0]) - sizeof(mp->pcodePointer[1]),
-					   &mp->pcodePointer[2]);
+	put_unaligned_be16(size - 4, &mp->pcodePointer[2]);
 
-	/* And copy pcode/size into bitmap structure */
-	mp->pcodePointerBitMap[0] = mp->pcodePointer[1];
-	mp->pcodePointerBitMap[1] = mp->pcodePointer[2];
+	/* And copy the header into the bitmap structure */
+	mp->pcodePointerBitMap[0] = mp->pcodePointer[0];
+	mp->pcodePointerBitMap[1] = mp->pcodePointer[1];
+	put_unaligned_be16(size - 4, &mp->pcodePointerBitMap[2]);
 
 	mp->description = mode_control_data_protection;
 
@@ -370,11 +376,14 @@ int add_mode_data_compression(struct lu_phy_attr *lu) {
 	put_unaligned_be32(COMPRESSION_TYPE, &mp->pcodePointer[4]);
 	put_unaligned_be32(COMPRESSION_TYPE, &mp->pcodePointer[8]);
 
-	/* Changeable fields */
-	mp->pcodePointerBitMap[2] = 0xc0;					  /* DCE & DCC */
-	mp->pcodePointerBitMap[3] = 0x80;					  /* DDE bit */
-	put_unaligned_be32(0xffffffff, &mp->pcodePointer[4]); /* Comp alg */
-	put_unaligned_be32(0xffffffff, &mp->pcodePointer[8]); /* De-comp alg */
+	/* Changeable fields - these belong in the bitmap, not in the page:
+	 * writing them to pcodePointer overwrote the algorithm set above and
+	 * left the mask claiming the fields were fixed.
+	 */
+	mp->pcodePointerBitMap[2] = 0xc0; /* DCE & DCC */
+	mp->pcodePointerBitMap[3] = 0x80; /* DDE bit */
+	put_unaligned_be32(0xffffffff, &mp->pcodePointerBitMap[4]); /* Comp alg */
+	put_unaligned_be32(0xffffffff, &mp->pcodePointerBitMap[8]); /* De-comp alg */
 
 	mp->description = mode_data_compression;
 
@@ -527,12 +536,17 @@ int add_mode_device_configuration_extension(struct lu_phy_attr *lu) {
 	if (!mp)
 		return -ENOMEM;
 
-	mp->pcodePointer[0] = pcode;
-	mp->pcodePointer[1] = size - sizeof(mp->pcodePointer[0]) - sizeof(mp->pcodePointer[1]);
+	/* Subpage format: SPF set in byte 0, subpage code in byte 1, two byte
+	 * page length in bytes 2-3.
+	 */
+	mp->pcodePointer[0] = pcode | 0x40;
+	mp->pcodePointer[1] = subpcode;
+	put_unaligned_be16(size - 4, &mp->pcodePointer[2]);
 
-	/* And copy pcode/size into bitmap structure */
+	/* And copy the header into the bitmap structure */
 	mp->pcodePointerBitMap[0] = mp->pcodePointer[0];
 	mp->pcodePointerBitMap[1] = mp->pcodePointer[1];
+	put_unaligned_be16(size - 4, &mp->pcodePointerBitMap[2]);
 
 	mp->pcodePointer[5] = 0x02; /* Short erase mode  - write EOD */
 
@@ -1111,12 +1125,17 @@ int add_mode_encryption_mode_attribute(struct lu_phy_attr *lu) {
 	if (!mp)
 		return -ENOMEM;
 
-	mp->pcodePointer[0] = pcode;
-	mp->pcodePointer[1] = size - sizeof(mp->pcodePointer[0]) - sizeof(mp->pcodePointer[1]);
+	/* Subpage format: SPF set in byte 0, subpage code in byte 1, two byte
+	 * page length in bytes 2-3.
+	 */
+	mp->pcodePointer[0] = pcode | 0x40;
+	mp->pcodePointer[1] = subpcode;
+	put_unaligned_be16(size - 4, &mp->pcodePointer[2]);
 
-	/* And copy pcode/size into bitmap structure */
+	/* And copy the header into the bitmap structure */
 	mp->pcodePointerBitMap[0] = mp->pcodePointer[0];
 	mp->pcodePointerBitMap[1] = mp->pcodePointer[1];
+	put_unaligned_be16(size - 4, &mp->pcodePointerBitMap[2]);
 
 	/* Application Managed Encryption */
 	mp->pcodePointer[5] = 0x03; /* Encryption Solution Method */

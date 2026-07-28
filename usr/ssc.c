@@ -527,7 +527,7 @@ uint8_t check_restrictions(struct scsi_cmd *cmd) {
 
 			uint64_t TAflag;
 
-			lu_priv->OK_2_write		 = 0;
+			*lu_priv->OK_2_write	 = 0;
 			lu_priv->allow_overwrite = FALSE;
 			sam_data_protect(E_MEDIUM_OVERWRITE_ATTEMPT, sam_stat);
 			/* And set TapeAlert flg 09 -> WRITE PROTECT */
@@ -677,8 +677,8 @@ uint8_t ssc_locate(struct scsi_cmd *cmd) {
 	case LOCATE_16:
 		if (cdb[1] & 0b00000010)
 			partition_no = cdb[3];
-		switch (cdb[1] & 0b00011000) { /* Destination Type */
-		case 0b00:					   /* with logical object identifier */
+		switch ((cdb[1] >> 3) & 0b00000011) { /* Destination Type */
+		case 0b00:							  /* with logical object identifier */
 			blk_no = get_unaligned_be64(&cdb[4]);
 			/* mhvtl only supports u32 blk_numbers so blk_no will be truncated */
 			break;
@@ -687,6 +687,7 @@ uint8_t ssc_locate(struct scsi_cmd *cmd) {
 			break;
 		case 0b11: /* finish with EOD */
 			blk_no = last_block(partition_no);
+			break;
 		default:
 			sam_illegal_request(E_INVALID_FIELD_IN_CDB, NULL, sam_stat);
 			return SAM_STAT_CHECK_CONDITION;
@@ -1268,7 +1269,10 @@ uint8_t ssc_write_attributes(struct scsi_cmd *cmd) {
 		return SAM_STAT_CHECK_CONDITION;
 		break;
 	}
-	return SAM_STAT_GOOD;
+	/* resp_write_attribute() and rewriteMAM() report failures through the
+	 * sense buffer, so returning GOOD unconditionally would hide them.
+	 */
+	return *sam_stat;
 }
 
 uint8_t ssc_tur(struct scsi_cmd *cmd) {
@@ -1398,7 +1402,8 @@ uint8_t ssc_read_attributes(struct scsi_cmd *cmd) {
 		break;
 	}
 
-	if (cdb[7] > mam.num_partitions) {
+	/* Partition numbers are zero based */
+	if (cdb[7] >= mam.num_partitions) {
 		sam_illegal_request(E_INVALID_FIELD_IN_CDB, NULL, sam_stat);
 		MHVTL_DBG(1, "Not enough partitions : requested partition %d over %d ", cdb[7], mam.num_partitions);
 		return SAM_STAT_CHECK_CONDITION;
@@ -1407,14 +1412,24 @@ uint8_t ssc_read_attributes(struct scsi_cmd *cmd) {
 	switch (service_action) {
 	case 0x00: /* Attribute values */
 	case 0x01: /* Attribute list */
-		dbuf_p->sz = resp_read_attribute(cmd);
+		/* resp_read_attribute() returns the available data length, which
+		 * may exceed what the initiator asked for.
+		 */
+		dbuf_p->sz = min((uint32_t)resp_read_attribute(cmd),
+						 get_unaligned_be32(&cdb[10]));
 		break;
-	case 0x03:								 /* Partition list */
-		put_unaligned_be16(0x0002, &buf[0]); /* Available data */
-		buf[1]	   = 0;						 /* First partition number */
-		buf[2]	   = mam.num_partitions;	 /* Number of partitions available */
-		dbuf_p->sz = buf[0];
+	case 0x03: {							  /* Partition list */
+		uint32_t alloc_len = get_unaligned_be32(&cdb[10]);
+
+		/* AVAILABLE DATA is a four byte field and excludes itself; the
+		 * list is one byte of first partition number plus one of count.
+		 */
+		put_unaligned_be32(2, &buf[0]);
+		buf[4]	   = 0;					  /* First partition number */
+		buf[5]	   = mam.num_partitions;  /* Number of partitions available */
+		dbuf_p->sz = min((uint32_t)6, alloc_len);
 		break;
+	}
 	default:
 		sd.byte0		 = SKSV | CD;
 		sd.field_pointer = 1;
@@ -1611,6 +1626,7 @@ uint8_t ssc_read_position(struct scsi_cmd *cmd) {
 
 			MHVTL_DBG(1, "Positioned at partition/block %u/%u", c_pos->partition_id, c_pos->blk_number);
 			cmd->dbuf_p->sz = READ_POSITION_EXTENDED_LEN;
+			break;
 
 		default:
 			MHVTL_DBG(1, "service_action not supported");
@@ -1942,14 +1958,14 @@ uint8_t ssc_log_sense(struct scsi_cmd *cmd) {
 	struct s_sd			sd;
 
 	MHVTL_DBG(1, "LOG SENSE (%ld) ** %s",
-			  (long)dbuf_p->serialNo, log_page_desc[page]);
+			  (long)dbuf_p->serialNo, log_page_name(page));
 
 	if (page == SUPPORTED_LOG_PAGES) { /* Send supported pages */
 		int i = 4;
 		memset(buf, 0, 4); /* Clear first few (4) bytes */
 		buf[i++] = 0;	   /* b[0] is log page '0' (this one) */
 		list_for_each_entry(l, &lu->log_pg, siblings) {
-			MHVTL_DBG(3, "found page 0x%02x : %s", l->log_page_num, log_page_desc[l->log_page_num]);
+			MHVTL_DBG(3, "found page 0x%02x : %s", l->log_page_num, log_page_name(l->log_page_num));
 			buf[i] = l->log_page_num;
 			i++;
 		}

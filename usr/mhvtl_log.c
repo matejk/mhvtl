@@ -44,7 +44,7 @@
 	},                                    \
 		.name
 
-const char *log_page_desc[0x38] = {
+const char *log_page_desc[LOG_PAGE_DESC_SZ] = {
 	[0x00 ... 0x37]				  = "Unsupported Log page",
 	[SUPPORTED_LOG_PAGES]		  = "Supported Log pages",
 	[BUFFER_UNDER_OVER_RUN]		  = "Buffer Under/Over Run",
@@ -78,7 +78,7 @@ struct log_pg_list *lookup_log_pg(struct list_head *l, uint8_t page, uint8_t sub
 
 	list_for_each_entry(log_pg, l, siblings) {
 		if (log_pg->log_page_num == page && log_pg->log_subpage_num == subpage) {
-			MHVTL_DBG(2, "log page (0x%02x - 0x%02x) found : %s", page, subpage, log_page_desc[page]);
+			MHVTL_DBG(2, "log page (0x%02x - 0x%02x) found : %s", page, subpage, log_page_name(page));
 			return log_pg;
 		}
 	}
@@ -86,7 +86,7 @@ struct log_pg_list *lookup_log_pg(struct list_head *l, uint8_t page, uint8_t sub
 	/* If no page found, ignore subpage */
 	list_for_each_entry(log_pg, l, siblings) {
 		if (log_pg->log_page_num == page) {
-			MHVTL_DBG(2, "log page (0x%02x - 0x%02x) found but wrong supbage: %s", page, subpage, log_page_desc[page]);
+			MHVTL_DBG(2, "log page (0x%02x - 0x%02x) found but wrong supbage: %s", page, subpage, log_page_name(page));
 			return log_pg;
 		}
 	}

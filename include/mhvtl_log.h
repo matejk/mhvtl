@@ -574,6 +574,15 @@ int add_log_data_compression(struct lu_phy_attr *lu);
 int add_log_device_status(struct lu_phy_attr *lu);
 int add_log_performance_characteristics(struct lu_phy_attr *lu);
 
-extern const char *log_page_desc[0x38];
+#define LOG_PAGE_DESC_SZ 0x38
+
+extern const char *log_page_desc[LOG_PAGE_DESC_SZ];
+
+/* LOG SENSE page codes are six bits, so they reach past the table above */
+static inline const char *log_page_name(uint8_t page) {
+	return (page < LOG_PAGE_DESC_SZ && log_page_desc[page])
+			   ? log_page_desc[page]
+			   : "Unknown log page";
+}
 
 #endif /* MHVTL_LOG_H */
