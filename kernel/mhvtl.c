@@ -392,16 +392,16 @@ static const struct file_operations mhvtl_fops = {
 	.release = mhvtl_release,
 };
 
+/* The variants for 2.6.26 and earlier used kmap()/kmap_atomic() with the
+ * KM_* slot arguments and the pre-2.6.24 sg->page member, none of which the
+ * kernel still provides, so they could not build in any case.
+ */
 #if LINUX_VERSION_CODE > KERNEL_VERSION(4, 17, 0)
 #include "fetch50.c"
 #elif LINUX_VERSION_CODE > KERNEL_VERSION(2, 6, 26)
 #include "fetch27.c"
-#elif LINUX_VERSION_CODE == KERNEL_VERSION(2, 6, 26)
-#include "fetch26.c"
-#elif LINUX_VERSION_CODE > KERNEL_VERSION(2, 6, 23)
-#include "fetch24.c"
 #else
-#include "fetch.c"
+#error "mhvtl requires Linux 2.6.27 or later"
 #endif
 
 /**********************************************************************
