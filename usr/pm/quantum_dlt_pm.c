@@ -395,6 +395,7 @@ void init_dlt7000_ssc(struct lu_phy_attr *lu) {
 	add_log_volume_statistics(lu);
 	add_log_tape_alert(lu);
 	add_log_tape_usage(lu);
+	add_log_device_statistics(lu);
 	add_log_tape_capacity(lu);
 	add_log_data_compression(lu);
 	add_log_performance_characteristics(lu);
@@ -445,6 +446,7 @@ void init_dlt8000_ssc(struct lu_phy_attr *lu) {
 	add_log_volume_statistics(lu);
 	add_log_tape_alert(lu);
 	add_log_tape_usage(lu);
+	add_log_device_statistics(lu);
 	add_log_tape_capacity(lu);
 	add_log_data_compression(lu);
 	add_log_performance_characteristics(lu);
@@ -500,6 +502,7 @@ void init_sdlt320_ssc(struct lu_phy_attr *lu) {
 	add_log_volume_statistics(lu);
 	add_log_tape_alert(lu);
 	add_log_tape_usage(lu);
+	add_log_device_statistics(lu);
 	add_log_tape_capacity(lu);
 	add_log_data_compression(lu);
 	add_log_performance_characteristics(lu);
@@ -554,6 +557,7 @@ void init_sdlt600_ssc(struct lu_phy_attr *lu) {
 	add_log_volume_statistics(lu);
 	add_log_tape_alert(lu);
 	add_log_tape_usage(lu);
+	add_log_device_statistics(lu);
 	add_log_tape_capacity(lu);
 	add_log_data_compression(lu);
 	add_log_performance_characteristics(lu);

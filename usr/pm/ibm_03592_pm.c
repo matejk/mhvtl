@@ -414,6 +414,7 @@ void init_3592_j1a(struct lu_phy_attr *lu) {
 	add_log_volume_statistics(lu);
 	add_log_tape_alert(lu);
 	add_log_tape_usage(lu);
+	add_log_device_statistics(lu);
 	add_log_tape_capacity(lu);
 	add_log_data_compression(lu);
 	add_log_performance_characteristics(lu);
@@ -450,6 +451,7 @@ void init_3592_E05(struct lu_phy_attr *lu) {
 	add_log_volume_statistics(lu);
 	add_log_tape_alert(lu);
 	add_log_tape_usage(lu);
+	add_log_device_statistics(lu);
 	add_log_tape_capacity(lu);
 	add_log_data_compression(lu);
 	add_log_performance_characteristics(lu);
@@ -492,6 +494,7 @@ void init_3592_E06(struct lu_phy_attr *lu) {
 	add_log_volume_statistics(lu);
 	add_log_tape_alert(lu);
 	add_log_tape_usage(lu);
+	add_log_device_statistics(lu);
 	add_log_tape_capacity(lu);
 	add_log_data_compression(lu);
 	add_log_performance_characteristics(lu);
@@ -539,6 +542,7 @@ void init_3592_E07(struct lu_phy_attr *lu) {
 	add_log_volume_statistics(lu);
 	add_log_tape_alert(lu);
 	add_log_tape_usage(lu);
+	add_log_device_statistics(lu);
 	add_log_tape_capacity(lu);
 	add_log_data_compression(lu);
 	add_log_performance_characteristics(lu);
