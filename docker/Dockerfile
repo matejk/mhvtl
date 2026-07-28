@@ -27,9 +27,10 @@ WORKDIR /mhvtl/etc
 RUN sed -i 's/semanage/#semanage/g' Makefile && \
     make install
 
-# Install systemd service definitions
+# Install systemd service definitions from the source tree, not from the
+# container's own /etc, which never held them.
 WORKDIR /mhvtl
-RUN find /etc -maxdepth 1 \
+RUN find /mhvtl/etc -maxdepth 1 \
         \( -name '*.target' -o -name '*.service' \) \
         -exec cp {} /usr/lib/systemd/system/ \;
 

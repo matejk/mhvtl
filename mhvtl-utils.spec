@@ -132,7 +132,6 @@ install -d -m 755 %{buildroot}/var/lib/%{name}
 %{_bindir}/generate_device_conf
 %{_bindir}/generate_library_contents
 %{_libdir}/libvtlscsi.so
-%{_libdir}/libvtlcart.so
 %{_firmwarepath}/mhvtl/mhvtl_kernel.tgz
 %dir %{_sysconfdir}/mhvtl
 %config(noreplace) %{_sysconfdir}/mhvtl/mhvtl.conf
