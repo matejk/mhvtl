@@ -443,10 +443,7 @@ static int sizeof_element(struct scsi_cmd *cmd, int type) {
 	int				 voltag;
 
 	voltag = (cmd->scb[1] & 0x10) >> 4;
-	if (smc_p->pm->no_dvcid_flag)
-		dvcid = 1;
-	else
-		dvcid = cmd->scb[6] & 0x01; /* Device ID */
+	dvcid = cmd->scb[6] & 0x01; /* Device ID */
 
 	return 16 + (voltag ? VOLTAG_LEN : 0) +
 		   (dvcid && (type == DATA_TRANSFER) ? smc_p->pm->dvcid_len : 0);
@@ -465,10 +462,7 @@ static int fill_ed(struct scsi_cmd *cmd, uint8_t *p, struct s_info *s) {
 	uint8_t			 dvcid;
 
 	voltag = (cmd->scb[1] & 0x10) >> 4;
-	if (smc_p->pm->no_dvcid_flag)
-		dvcid = 1;
-	else
-		dvcid = cmd->scb[6] & 0x01; /* Device ID */
+	dvcid = cmd->scb[6] & 0x01; /* Device ID */
 
 	/* Should never occur, but better to trap then core */
 	if (!s) {
@@ -902,10 +896,7 @@ uint8_t smc_read_element_status(struct scsi_cmd *cmd) {
 #ifdef MHVTL_DEBUG
 	uint8_t voltag = (cdb[1] & 0x10) >> 4;
 	uint8_t dvcid; /* Device ID */
-	if (smc_p->pm->no_dvcid_flag)
-		dvcid = 1;
-	else
-		dvcid = cmd->scb[6] & 0x01; /* Device ID */
+	dvcid = cmd->scb[6] & 0x01; /* Device ID */
 #endif
 
 	MHVTL_DBG(1, "READ ELEMENT STATUS (%ld) **",
