@@ -506,12 +506,180 @@ uint8_t spc_log_select(struct scsi_cmd *cmd) {
 }
 
 /*
+ * Validate an element address assignment page (1Dh) supplied by MODE
+ * SELECT against the current one.
+ *
+ * SMC-2 7.3.3 requires two things of a media changer: the element counts
+ * may not exceed the values reported by MODE SENSE, and the four address
+ * ranges may not overlap, since every element needs a unique address.
+ *
+ * 'req' and 'cur' point at the page code byte of the requested and the
+ * current page. Returns 0 if acceptable, otherwise the sense code, with
+ * the offending byte offset within the page stored in *bad.
+ */
+static int check_element_address_page(uint8_t *req, uint8_t *cur, int *bad) {
+	/* Field offsets within the page: address then count, per type */
+	static const int addr_off[] = {2, 6, 10, 14};
+	static const int cnt_off[]	= {4, 8, 12, 16};
+	uint32_t		 start[4], count[4];
+	int				 i, j;
+
+	for (i = 0; i < 4; i++) {
+		start[i] = get_unaligned_be16(&req[addr_off[i]]);
+		count[i] = get_unaligned_be16(&req[cnt_off[i]]);
+
+		if (count[i] > get_unaligned_be16(&cur[cnt_off[i]])) {
+			*bad = cnt_off[i];
+			return E_PARAMETER_VALUE_INVALID;
+		}
+	}
+
+	for (i = 0; i < 4; i++) {
+		if (!count[i])
+			continue;
+		for (j = i + 1; j < 4; j++) {
+			if (!count[j])
+				continue;
+			if (start[i] < start[j] + count[j] &&
+				start[j] < start[i] + count[i]) {
+				*bad = addr_off[j];
+				return E_INVALID_ELEMENT_ADDR;
+			}
+		}
+	}
+
+	return 0;
+}
+
+/*
  * Process the MODE_SELECT command
  */
 uint8_t spc_mode_select(struct scsi_cmd *cmd) {
-	MHVTL_DBG(1, "MODE SELECT (%ld) **", (long)cmd->dbuf_p->serialNo);
+	struct mhvtl_ds *dbuf_p	  = cmd->dbuf_p;
+	uint8_t			*cdb	  = cmd->scb;
+	uint8_t			*buf	  = (uint8_t *)dbuf_p->data;
+	uint8_t			*sam_stat = &dbuf_p->sam_stat;
+	struct mode		*mp;
+	struct s_sd		 sd;
+	int				 mode_param_h_sz;
+	int				 block_descriptor_len;
+	int				 count;
+	int				 i;
+	int				 ec;
+	int				 bad;
 
-	cmd->dbuf_p->sz = 0;
+	switch (cdb[0]) {
+	case MODE_SELECT:
+		dbuf_p->sz		= cdb[4];
+		mode_param_h_sz = 4;
+		break;
+	case MODE_SELECT_10:
+		dbuf_p->sz		= get_unaligned_be16(&cdb[7]);
+		mode_param_h_sz = 8;
+		break;
+	default:
+		dbuf_p->sz		= 0;
+		mode_param_h_sz = 0;
+	}
+
+	MHVTL_DBG(1, "MODE SELECT %d (%ld) **",
+			  (cdb[0] == MODE_SELECT) ? 6 : 10,
+			  (long)dbuf_p->serialNo);
+
+	if (!dbuf_p->sz) /* Nothing to apply */
+		return SAM_STAT_GOOD;
+
+	count = retrieve_CDB_data(cmd->cdev, dbuf_p);
+	if (count < mode_param_h_sz) {
+		sam_illegal_request(E_PARAMETER_LIST_LENGTH_ERR, NULL, sam_stat);
+		return SAM_STAT_CHECK_CONDITION;
+	}
+
+	if (cdb[0] == MODE_SELECT)
+		block_descriptor_len = buf[3];
+	else
+		block_descriptor_len = get_unaligned_be16(&buf[6]);
+
+	i = mode_param_h_sz + block_descriptor_len;
+
+	while (i + 2 <= count) {
+		uint8_t page	= buf[i] & 0x3f;
+		uint8_t subpage = 0;
+		int		page_len;
+		int		hdr;
+
+		if (buf[i] & 0x40) { /* SPF - sub page format */
+			if (i + 4 > count)
+				break;
+			subpage	 = buf[i + 1];
+			page_len = get_unaligned_be16(&buf[i + 2]);
+			hdr		 = 4;
+		} else {
+			page_len = buf[i + 1];
+			hdr		 = 2;
+		}
+
+		if (i + hdr + page_len > count) {
+			sam_illegal_request(E_PARAMETER_LIST_LENGTH_ERR, NULL,
+								sam_stat);
+			return SAM_STAT_CHECK_CONDITION;
+		}
+
+		mp = lookup_mode_pg(&cmd->lu->mode_pg, page, subpage);
+		if (!mp) {
+			MHVTL_DBG(1, "MODE SELECT of unsupported page 0x%02x/0x%02x",
+					  page, subpage);
+			sd.byte0		 = SKSV | BPV | 7;
+			sd.field_pointer = i;
+			sam_illegal_request(E_INVALID_FIELD_IN_PARMS, &sd,
+								sam_stat);
+			return SAM_STAT_CHECK_CONDITION;
+		}
+
+		if (page == MODE_ELEMENT_ADDRESS && !subpage &&
+			page_len + hdr >= 18) {
+			bad = 0;
+			ec	= check_element_address_page(&buf[i],
+											 mp->pcodePointer, &bad);
+			if (ec) {
+				MHVTL_DBG(1, "Bad element address assignment page");
+				sd.byte0		 = SKSV | BPV | 7;
+				sd.field_pointer = i + bad;
+				sam_illegal_request(ec, &sd, sam_stat);
+				return SAM_STAT_CHECK_CONDITION;
+			}
+		}
+
+		/* The changeable bitmap decides what a host may alter. mhvtl
+		 * builds every page from its configuration, so a request to
+		 * change a field that is not marked changeable is refused
+		 * rather than silently ignored.
+		 */
+		{
+			int n = min(page_len + hdr, mp->pcodeSize);
+			int k;
+
+			for (k = hdr; k < n; k++) {
+				uint8_t diff = buf[i + k] ^ mp->pcodePointer[k];
+
+				if (diff & ~mp->pcodePointerBitMap[k]) {
+					MHVTL_DBG(1, "Page 0x%02x byte %d not changeable",
+							  page, k);
+					sd.byte0		 = SKSV | BPV | 7;
+					sd.field_pointer = i + k;
+					sam_illegal_request(E_INVALID_FIELD_IN_PARMS, &sd,
+										sam_stat);
+					return SAM_STAT_CHECK_CONDITION;
+				}
+				mp->pcodePointer[k] =
+					(mp->pcodePointer[k] & ~mp->pcodePointerBitMap[k]) |
+					(buf[i + k] & mp->pcodePointerBitMap[k]);
+			}
+		}
+
+		i += hdr + page_len;
+	}
+
 	return SAM_STAT_GOOD;
 }
 
