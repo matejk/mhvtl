@@ -111,7 +111,10 @@ struct device_type_template smc_template = {
 		SCSI_OP(0x1e, smc_allow_removal),
 
 		/* 0x20 -> 0x2f */
+
 		/* 0x30 -> 0x3f */
+		SCSI_OP(0x37, smc_initialize_element_status_with_range),
+
 		/* 0x40 -> 0x4f */
 		SCSI_OP(0x4c, spc_log_select),
 		SCSI_OP(0x4d, smc_log_sense),
@@ -137,6 +140,9 @@ struct device_type_template smc_template = {
 		/* 0xc0 -> 0xcf */
 		/* 0xd0 -> 0xdf */
 		/* 0xe0 -> 0xef */
+		/* Vendor code used for 0x37 before it was standardised
+		 * (SMC-2 6.6 note 4). Some libraries accept only this one.
+		 */
 		SCSI_OP(0xe7, smc_initialize_element_status_with_range),
 
 		/* 0xf0 -> 0xff */
@@ -1167,9 +1173,9 @@ static int init_lu(struct lu_phy_attr *lu, unsigned minor, struct mhvtl_ctl *ctl
 
 	put_unaligned_be16(0x0300, &lu->inquiry[58]); /* SPC-3 No ver claimed */
 	put_unaligned_be16(0x0960, &lu->inquiry[60]); /* iSCSI */
-	put_unaligned_be16(0x0200, &lu->inquiry[62]); /* SSC */
+	put_unaligned_be16(0x02fe, &lu->inquiry[62]); /* SMC-2 */
 
-	lu->ptype = TYPE_MEDIUM_CHANGER; /* SSC */
+	lu->ptype = TYPE_MEDIUM_CHANGER;
 
 	lu->sense_p = &sense[0]; /* Save pointer to sense buffer */
 
