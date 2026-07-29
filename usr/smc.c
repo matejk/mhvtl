@@ -1828,7 +1828,10 @@ uint8_t smc_request_volume_element_address(struct scsi_cmd *cmd) {
 	list_for_each_entry(sp, &smc_p->slot_list, siblings) {
 		if (sp->slot_location < start)
 			continue;
-		if (req_num && reported >= req_num)
+		/* As in READ ELEMENT STATUS, this is a maximum and zero means
+		 * report nothing.
+		 */
+		if (reported >= req_num)
 			break;
 		if (!svt_selected(smc_p, sp))
 			continue;
