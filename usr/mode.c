@@ -1235,14 +1235,21 @@ int add_mode_element_address_assignment(struct lu_phy_attr *lu) {
 int add_mode_transport_geometry(struct lu_phy_attr *lu) {
 	struct list_head *mode_pg;
 	struct mode		 *mp;
+	struct smc_priv	 *smc_p;
 	uint8_t			  pcode;
 	uint8_t			  subpcode;
 	uint8_t			  size;
 
 	mode_pg	 = &lu->mode_pg;
+	smc_p	 = (struct smc_priv *)lu->lu_private;
 	pcode	 = MODE_TRANSPORT_GEOMETRY;
 	subpcode = 0;
-	size	 = 4;
+
+	/* SMC-2 7.3.4: one two byte descriptor per medium transport
+	 * element. A fixed single descriptor contradicts the element count
+	 * reported in the element address assignment page.
+	 */
+	size = 2 + (2 * (smc_p->num_picker ? smc_p->num_picker : 1));
 
 	MHVTL_DBG(3, "Adding mode page %s (%02x/%02x)",
 			  mode_transport_geometry, pcode, subpcode);
@@ -1270,11 +1277,13 @@ int add_mode_transport_geometry(struct lu_phy_attr *lu) {
 int add_mode_device_capabilities(struct lu_phy_attr *lu) {
 	struct list_head *mode_pg;
 	struct mode		 *mp;
+	struct smc_priv	 *smc_p;
 	uint8_t			  pcode;
 	uint8_t			  subpcode;
 	uint8_t			  size;
 
 	mode_pg	 = &lu->mode_pg;
+	smc_p	 = (struct smc_priv *)lu->lu_private;
 	pcode	 = MODE_DEVICE_CAPABILITIES;
 	subpcode = 0;
 	size	 = 20;
@@ -1294,7 +1303,17 @@ int add_mode_device_capabilities(struct lu_phy_attr *lu) {
 	mp->pcodePointerBitMap[1] = mp->pcodePointer[1];
 
 	mp->pcodePointer[2] = 0x0f;
-	mp->pcodePointer[3] = 0x07;
+
+	/* SMC-2 7.3.2 byte 3: ACE (bit 2), VTRP (bit 1), S2C (bit 0).
+	 * ACE is left clear - nothing in the changer manages the drive
+	 * cleaning process, and the bit means the device server does.
+	 * VTRP follows the configured barcode reader rather than being
+	 * asserted unconditionally.
+	 */
+	mp->pcodePointer[3] = 0x01; /* S2C */
+	if (smc_p->pm->library_has_barcode_reader)
+		mp->pcodePointer[3] |= 0x02; /* VTRP */
+
 	mp->pcodePointer[4] = 0x0f;
 	mp->pcodePointer[5] = 0x0f;
 	mp->pcodePointer[6] = 0x0f;

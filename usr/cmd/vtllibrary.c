@@ -590,6 +590,7 @@ static void update_drive_details(struct lu_phy_attr *lu) {
 	FILE			*conf;
 	char			*b; /* Read from file into this buffer */
 	int				 slot;
+	int				 channel, target, lun;
 	long			 drv_id, lib_id;
 	struct d_info	*dp;
 	struct s_info	*sp;
@@ -612,14 +613,20 @@ static void update_drive_details(struct lu_phy_attr *lu) {
 	}
 
 	drv_id = -1;
+	target = 0;
 	dp	   = NULL;
 
 	/* While read in a line */
 	while (readline(b, MALLOC_SZ, conf) != NULL) {
 		if (b[0] == '#') /* Ignore comments */
 			continue;
-		if (sscanf(b, "Drive: %ld", &drv_id) > 0)
+		if (sscanf(b, "Drive: %ld CHANNEL: %d TARGET: %d LUN: %d",
+				   &drv_id, &channel, &target, &lun) == 4)
 			continue;
+		if (sscanf(b, "Drive: %ld", &drv_id) > 0) {
+			target = 0; /* No TARGET given for this drive */
+			continue;
+		}
 		if (sscanf(b, " Library ID: %ld Slot: %d", &lib_id, &slot) == 2 && lib_id == my_id && drv_id >= 0) {
 			MHVTL_DBG(2, "Found Drive %ld in slot %d",
 					  drv_id, slot);
@@ -643,6 +650,11 @@ static void update_drive_details(struct lu_phy_attr *lu) {
 					  dp->slot->slot_location,
 					  drv_id);
 			dp->drv_id = drv_id;
+			/* TARGET from device.conf is the drive's SCSI bus
+			 * address, reported in the element descriptor by
+			 * personalities that emulate parallel SCSI.
+			 */
+			dp->SCSI_ID = target;
 			continue;
 		}
 		if (dp) {

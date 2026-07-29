@@ -507,11 +507,19 @@ static int fill_ed(struct scsi_cmd *cmd, uint8_t *p, struct s_info *s) {
 	p[j++] = (s->asc_ascq >> 8) & 0xff; /* Additional Sense Code */
 	p[j++] = s->asc_ascq & 0xff;		/* Additional Sense Code Qualifer */
 
-	p[j++] = 0; /* Reserved */
-	if (s->element_type == DATA_TRANSFER)
+	/* ID VALID (bit 5) and the SCSI bus address that follows it were
+	 * removed in SMC-2, but libraries with parallel SCSI drives still
+	 * report them. Reporting an address without ID VALID - which is
+	 * what this did - matches no library either way.
+	 */
+	if (s->element_type == DATA_TRANSFER &&
+		smc_p->pm->report_scsi_bus_address) {
+		p[j++] = 0x20; /* ID VALID */
 		p[j++] = d->SCSI_ID;
-	else
-		p[j++] = 0; /* Reserved */
+	} else {
+		p[j++] = 0;
+		p[j++] = 0;
+	}
 
 	p[j++] = 0; /* Reserved */
 
