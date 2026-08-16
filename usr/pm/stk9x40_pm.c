@@ -543,12 +543,8 @@ void init_9940A_ssc(struct lu_phy_attr *lu) {
 
 	add_density_support(&lu->den_list, &density_9940A, 1);
 
-	add_drive_media_list(lu, LOAD_RW, "9840A");
-	add_drive_media_list(lu, LOAD_RO, "9840A Clean");
-	add_drive_media_list(lu, LOAD_RW, "9840A");
-	add_drive_media_list(lu, LOAD_RO, "9840A Clean");
-	add_drive_media_list(lu, LOAD_RW, "9840A");
-	add_drive_media_list(lu, LOAD_RO, "9840A Clean");
+	add_drive_media_list(lu, LOAD_RW, "9940A");
+	add_drive_media_list(lu, LOAD_RO, "9940A Clean");
 }
 
 void init_9940B_ssc(struct lu_phy_attr *lu) {
