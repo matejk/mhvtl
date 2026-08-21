@@ -61,7 +61,6 @@ typedef void (*init_pg_fn)(void *log_ptr);
 
 struct log_pg_list {
 	struct list_head siblings;
-	char			*description;
 	int				 log_page_num;
 	int				 log_subpage_num;
 	int				 size;

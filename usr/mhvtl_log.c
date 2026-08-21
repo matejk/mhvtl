@@ -140,7 +140,7 @@ void dealloc_all_log_pages(struct lu_phy_attr *lu) {
 	struct log_pg_list *lp, *ln;
 
 	list_for_each_entry_safe(lp, ln, &lu->log_pg, siblings) {
-		MHVTL_DBG(2, "Removing %s", lp->description);
+		MHVTL_DBG(2, "Removing %s", log_page_name(lp->log_page_num));
 		free(lp->p);
 		list_del(&lp->siblings);
 		free(lp);
