@@ -1470,14 +1470,23 @@ static void customise_lu(struct lu_phy_attr *lu) {
 		init_default_smc(lu);
 }
 
+static volatile sig_atomic_t reread_config_requested;
+
+/* SIGHUP handler: only raise a flag. The re-initialisation itself runs
+ * from the main loop, where no command is part way through.
+ */
 void rereadconfig(int sig) {
+	(void)sig;
+	reread_config_requested = 1;
+}
+
+static void do_rereadconfig(void) {
 	struct mhvtl_ctl ctl;
 	int				 buffer_size;
 
 	lunit.online = 0; /* Report library offline until finished */
 
-	MHVTL_DBG(1, "Caught signal (%d): Re-initialising library %d",
-			  sig, (int)my_id);
+	MHVTL_DBG(1, "Re-initialising library %d", (int)my_id);
 
 	cleanup_lu(&lunit);
 
@@ -1836,6 +1845,11 @@ int main(int argc, char *argv[]) {
 				break;
 
 			case VTL_IDLE:
+				if (reread_config_requested) {
+					reread_config_requested = 0;
+					do_rereadconfig();
+					buffer_size = smc_slots.bufsize;
+				}
 				usleep(pollInterval);
 
 				if (pollInterval < 1000000)

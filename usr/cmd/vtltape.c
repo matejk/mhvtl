@@ -266,8 +266,20 @@ int lookup_mode_media_type(struct name_to_media_info *media_info, int med) {
 	return media_type_unknown;
 }
 
+static volatile sig_atomic_t mount_complete;
+
+/* Only raise a flag here - apply_mount_complete() does the work from the
+ * main loop, where the log pages are not being read by a command.
+ */
 static void finish_mount(int sig) {
-	MHVTL_DBG(3, "+++ Trace - Received signal %d +++", sig);
+	(void)sig;
+	mount_complete = 1;
+}
+
+static void apply_mount_complete(void) {
+	if (!mount_complete)
+		return;
+	mount_complete = 0;
 	if (get_tape_load_status() == TAPE_LOADING)
 		set_tape_load_status(TAPE_LOADED);
 }
@@ -283,10 +295,12 @@ void delay_opcode(int what, int value) {
 
 	switch (what) {
 	case DELAY_LOAD:
-		if (value)
+		if (value) {
 			set_mount_timer(value);
-		else
-			finish_mount(1);
+		} else {
+			mount_complete = 1;
+			apply_mount_complete();
+		}
 		break;
 	default:
 		sleep(value);
@@ -2207,10 +2221,21 @@ void ssc_personality_module_register(struct ssc_personality_template *pm) {
 	}
 }
 
+/* Neither printf() nor syslog() is async-signal-safe, so just note the
+ * signal and let the main loop report it.
+ */
+static volatile sig_atomic_t caught_signo;
+
 static void caught_signal(int signo) {
-	printf("Please use 'vtlcmd <index> exit' to shutdown nicely\n"
-		   " Received signal: %d\n\n",
-		   signo);
+	caught_signo = signo;
+}
+
+static void report_caught_signal(void) {
+	int signo = caught_signo;
+
+	if (!signo)
+		return;
+	caught_signo = 0;
 	MHVTL_LOG("Please use 'vtlcmd <index> exit' to shutdown nicely,"
 			  " Received signal: %d",
 			  signo);
@@ -2494,6 +2519,8 @@ int main(int argc, char *argv[]) {
 				break;
 
 			case VTL_IDLE:
+				apply_mount_complete();
+				report_caught_signal();
 				usleep(sleep_time);
 
 				/* While nothing to do, increase
