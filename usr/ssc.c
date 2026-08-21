@@ -867,16 +867,29 @@ static uint8_t configure_timestamp(struct scsi_cmd *cmd) {
 	return SAM_STAT_GOOD;
 }
 
+/* An operation code that is defined but whose service action is not supported.
+ * SPC-6 5.6 puts the field in error at the service action, not at the
+ * operation code, so this cannot use log_opcode().
+ */
+static uint8_t unsupported_service_action(char *name, struct scsi_cmd *cmd) {
+	struct s_sd sd;
+
+	MHVTL_DBG(1, "*** Unsupported service action: %s ***", name);
+	sd.byte0		 = SKSV | CD;
+	sd.field_pointer = 1;
+	sam_illegal_request(E_INVALID_FIELD_IN_CDB, &sd, &cmd->dbuf_p->sam_stat);
+	MHVTL_DBG_PRT_CDB(1, cmd);
+	return SAM_STAT_CHECK_CONDITION;
+}
+
 uint8_t ssc_a3_service_action(struct scsi_cmd *cmd) {
 	declare_ssc_vars;
 
 	switch (cdb[1] & 0x1f) {
 	case MANAGEMENT_PROTOCOL_IN:
-		log_opcode("MANAGEMENT PROTOCOL IN **", cmd);
-		break;
+		return unsupported_service_action("MANAGEMENT PROTOCOL IN", cmd);
 	case REPORT_ALIASES:
-		log_opcode("REPORT ALIASES **", cmd);
-		break;
+		return unsupported_service_action("REPORT ALIASES", cmd);
 	case REPORT_SUPPORTED_OPCODES:
 		return spc_report_supported_opcodes(cmd);
 	case REPORT_TIMESTAMP:
@@ -884,8 +897,7 @@ uint8_t ssc_a3_service_action(struct scsi_cmd *cmd) {
 		return report_timestamp(cmd);
 		break;
 	default:
-		log_opcode("UNKNOWN SERVICE ACTION A3 **", cmd);
-		break;
+		return unsupported_service_action("UNKNOWN SERVICE ACTION A3", cmd);
 	}
 	return *sam_stat;
 }
@@ -895,21 +907,17 @@ uint8_t ssc_a4_service_action(struct scsi_cmd *cmd) {
 
 	switch (cdb[1] & 0x1f) {
 	case MANAGEMENT_PROTOCOL_OUT:
-		log_opcode("MANAGEMENT PROTOCOL OUT **", cmd);
-		break;
+		return unsupported_service_action("MANAGEMENT PROTOCOL OUT", cmd);
 	case CHANGE_ALIASES:
-		log_opcode("CHANGE ALIASES **", cmd);
-		break;
+		return unsupported_service_action("CHANGE ALIASES", cmd);
 	case FORCED_EJECT:
-		log_opcode("FORCED EJECT **", cmd);
-		break;
+		return unsupported_service_action("FORCED EJECT", cmd);
 	case SET_TIMESTAMP:
 		MHVTL_DBG(1, "SET TIMESTAMP (%ld) **", (long)dbuf_p->serialNo);
 		return configure_timestamp(cmd);
 		break;
 	default:
-		log_opcode("UNKNOWN SERVICE ACTION A4 **", cmd);
-		break;
+		return unsupported_service_action("UNKNOWN SERVICE ACTION A4", cmd);
 	}
 	return *sam_stat;
 }
