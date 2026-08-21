@@ -326,7 +326,7 @@ static int write_tape(char *source_file, uint32_t block_size, char *compression,
 				printf("zeroing out remaining block: %" PRIu32 "\n", (uint32_t)(block_size - count));
 				memset(b + count, 0, block_size - count); /* Zero out remaining block */
 			}
-			retval = writeBlock(&cmd, count);
+			retval = writeBlock(&cmd, count, 0);
 			if (retval < count) {
 				if (sense[2] == (VOLUME_OVERFLOW | SD_EOM) && sense[13] == E_EOM) {
 					printf("No space left on media, hit EOM while writing\n");

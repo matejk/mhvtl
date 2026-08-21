@@ -360,18 +360,23 @@ int readBlock(uint8_t *buf, uint32_t request_sz, int sili, int lbp_method, uint8
 	case 1:
 		rc = BlockProtectRSCRC(bounce_buffer, rc, lbp_rscrc_be);
 		if (rc == 0) {
+			/* Nothing was appended, so there is no protection information to
+			 * hand back and rc-relative indexing below would run off the
+			 * front of the buffer.
+			 */
 			MHVTL_ERR("Failed to generate/append RSCRC: lbp_be: %d", lbp_rscrc_be);
+			sam_hardware_error(E_LOGICAL_BLOCK_GUARD_FAILED, sam_stat);
+			goto free_bounce_buf;
 		}
 		MHVTL_DBG(2, "READ block %d LBP RSCRC : 0x%02x 0x%02x 0x%02x 0x%02x", blk_number, bounce_buffer[rc - 4], bounce_buffer[rc - 3], bounce_buffer[rc - 2], bounce_buffer[rc - 1]);
 		break;
 	case 2:
-		MHVTL_DBG(2, "rc: %d, request_sz: %d bounce buffer before LBP: 0x%08x %08x", rc, request_sz, get_unaligned_be32(&bounce_buffer[rc - 4]), get_unaligned_be32(&bounce_buffer[rc]));
 		/* If we don't have a LBP CRC32C format, re-calculate now */
 		lbp_crc = (blk_flags & BLKHDR_FLG_CRC) ? pre_crc : mhvtl_crc32c(bounce_buffer, rc);
-		memcpy(&bounce_buffer[rc], &lbp_crc, 4);
+		/* Protection information is a big-endian field on the wire */
+		put_unaligned_be32(lbp_crc, &bounce_buffer[rc]);
 		MHVTL_DBG(2, "Logical Block Protection - CRC32C, rc: %d, request_sz: %d, lbp_size: %d, CRC32C: 0x%8x", rc, request_sz, lbp_sz, lbp_crc);
-		MHVTL_DBG(2, "rc: %d, request_sz: %d bounce buffer after LBP: 0x%08x %08x", rc, request_sz, get_unaligned_be32(&bounce_buffer[rc - 4]), get_unaligned_be32(&bounce_buffer[rc]));
-		MHVTL_DBG(2, "READ block %d LBP RSCRC : 0x%02x 0x%02x 0x%02x 0x%02x", blk_number, bounce_buffer[rc], bounce_buffer[rc + 1], bounce_buffer[rc + 2], bounce_buffer[rc + 3]);
+		MHVTL_DBG(2, "READ block %d LBP CRC32C : 0x%02x 0x%02x 0x%02x 0x%02x", blk_number, bounce_buffer[rc], bounce_buffer[rc + 1], bounce_buffer[rc + 2], bounce_buffer[rc + 3]);
 		rc += 4; /* Account for LBP checksum */
 		break;
 	case 3:
@@ -536,9 +541,9 @@ static void log_lbp_method(int lbp_method) {
  *
  * Zero on error with sense buffer already filled in
  */
-static int writeBlock_nocomp(struct scsi_cmd *cmd, uint32_t src_sz, uint8_t null_wr, int lbp_method) {
+static int writeBlock_nocomp(struct scsi_cmd *cmd, uint32_t src_sz, uint32_t src_offset, uint8_t null_wr, int lbp_method) {
 	uint8_t			   *sam_stat = &cmd->dbuf_p->sam_stat;
-	uint8_t			   *src_buf	 = (uint8_t *)cmd->dbuf_p->data;
+	uint8_t			   *src_buf	 = (uint8_t *)cmd->dbuf_p->data + src_offset;
 	struct priv_lu_ssc *lu_priv;
 	uint32_t			crc;
 	int					rc;
@@ -574,14 +579,14 @@ static int writeBlock_nocomp(struct scsi_cmd *cmd, uint32_t src_sz, uint8_t null
  *
  * Zero on error with sense buffer already filled in
  */
-static int writeBlock_lzo(struct scsi_cmd *cmd, uint32_t src_sz, uint8_t null_wr, int lbp_method) {
+static int writeBlock_lzo(struct scsi_cmd *cmd, uint32_t src_sz, uint32_t src_offset, uint8_t null_wr, int lbp_method) {
 	lzo_uint  dest_len;
 	lzo_uint  src_len = src_sz;
 	lzo_bytep dest_buf;
 	lzo_bytep wrkmem = NULL;
 	uint32_t  crc;
 
-	lzo_bytep src_buf = (lzo_bytep)cmd->dbuf_p->data;
+	lzo_bytep src_buf = (lzo_bytep)cmd->dbuf_p->data + src_offset;
 
 	uint8_t *sam_stat = &cmd->dbuf_p->sam_stat;
 
@@ -649,12 +654,12 @@ static int writeBlock_lzo(struct scsi_cmd *cmd, uint32_t src_sz, uint8_t null_wr
  *
  * Zero on error with sense buffer already filled in
  */
-static int writeBlock_zlib(struct scsi_cmd *cmd, uint32_t src_sz, uint8_t null_wr, int lbp_method) {
+static int writeBlock_zlib(struct scsi_cmd *cmd, uint32_t src_sz, uint32_t src_offset, uint8_t null_wr, int lbp_method) {
 	Bytef			   *dest_buf;
 	uLong				dest_len;
 	uLong				src_len	 = src_sz;
 	uint8_t			   *sam_stat = &cmd->dbuf_p->sam_stat;
-	uint8_t			   *src_buf	 = (uint8_t *)cmd->dbuf_p->data;
+	uint8_t			   *src_buf	 = (uint8_t *)cmd->dbuf_p->data + src_offset;
 	struct priv_lu_ssc *lu_priv;
 	uint32_t			crc;
 	int					rc;
@@ -718,7 +723,7 @@ static int writeBlock_zlib(struct scsi_cmd *cmd, uint32_t src_sz, uint8_t null_w
 	return src_len;
 }
 
-int writeBlock(struct scsi_cmd *cmd, uint32_t src_sz) {
+int writeBlock(struct scsi_cmd *cmd, uint32_t src_sz, uint32_t src_offset) {
 	struct priv_lu_ssc *lu_priv;
 	int					src_len;
 	uint64_t			current_position;
@@ -772,20 +777,20 @@ int writeBlock(struct scsi_cmd *cmd, uint32_t src_sz) {
 
 	if (lu_priv->mamp->MediumType == MEDIA_TYPE_NULL) {
 		/* Don't compress if null tape media */
-		src_len = writeBlock_nocomp(cmd, lbp_sz, TRUE, 0);
+		src_len = writeBlock_nocomp(cmd, lbp_sz, src_offset, TRUE, 0);
 	} else if (*lu_priv->compressionFactor == MHVTL_NO_COMPRESSION) {
 		/* No compression - use the no-compression function */
-		src_len = writeBlock_nocomp(cmd, lbp_sz, FALSE, lbp_method);
+		src_len = writeBlock_nocomp(cmd, lbp_sz, src_offset, FALSE, lbp_method);
 	} else {
 		switch (lu_priv->compressionType) {
 		case LZO:
-			src_len = writeBlock_lzo(cmd, lbp_sz, FALSE, lbp_method);
+			src_len = writeBlock_lzo(cmd, lbp_sz, src_offset, FALSE, lbp_method);
 			break;
 		case ZLIB:
-			src_len = writeBlock_zlib(cmd, lbp_sz, FALSE, lbp_method);
+			src_len = writeBlock_zlib(cmd, lbp_sz, src_offset, FALSE, lbp_method);
 			break;
 		default:
-			src_len = writeBlock_nocomp(cmd, lbp_sz, FALSE, lbp_method);
+			src_len = writeBlock_nocomp(cmd, lbp_sz, src_offset, FALSE, lbp_method);
 			break;
 		}
 	}

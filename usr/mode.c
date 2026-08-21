@@ -689,10 +689,30 @@ int add_mode_medium_partition(struct lu_phy_attr *lu) {
 void set_medium_partition(struct scsi_cmd *cmd, uint8_t *p) {
 	struct lu_phy_attr *lu = cmd->lu;
 	struct mode		   *mp = lookup_mode_pg(&lu->mode_pg, MODE_MEDIUM_PARTITION, 0);
+	unsigned int		partitions;
 
-	/* ADDITIONAL PARTITIONS DEFINED */
-	mp->pcodePointer[3] = p[3];
-	mam.num_partitions	= mp->pcodePointer[3] + 1;
+	/* Drives which do not carry the page cannot be partitioned */
+	if (!mp) {
+		MHVTL_DBG(1, "No medium partition page - ignoring MODE SELECT");
+		return;
+	}
+
+	/* ADDITIONAL PARTITIONS DEFINED.
+	 *
+	 * The field is only restricted to 00h-03h when SDP or IDP is set; with
+	 * FDP set it is ignored and any value is legal, so it must be clamped
+	 * rather than rejected. The page holds MAX_PARTITIONS size descriptors
+	 * and the per-partition arrays are MAX_PARTITIONS deep.
+	 */
+	partitions = (unsigned int)p[3] + 1;
+	if (partitions > MAX_PARTITIONS) {
+		MHVTL_DBG(1, "ADDITIONAL PARTITIONS DEFINED %u exceeds %d - clamping",
+				  p[3], MAX_PARTITIONS - 1);
+		partitions = MAX_PARTITIONS;
+	}
+
+	mp->pcodePointer[3] = partitions - 1;
+	mam.num_partitions	= partitions;
 	MHVTL_DBG(3, "New total number of partitions : %d", mam.num_partitions);
 
 	mp->pcodePointer[4] = p[4]; /* flags */
@@ -700,7 +720,7 @@ void set_medium_partition(struct scsi_cmd *cmd, uint8_t *p) {
 	mp->pcodePointer[6] = p[6]; /* PARTITIONING TYPE | PARTITION UNITS */
 
 	/* PARTITION SIZES - two bytes each, not one */
-	for (int k = 0; k < mam.num_partitions; k++) {
+	for (unsigned int k = 0; k < partitions; k++) {
 		put_unaligned_be16(get_unaligned_be16(&p[8 + (2 * k)]),
 						   &mp->pcodePointer[8 + (2 * k)]);
 	}
