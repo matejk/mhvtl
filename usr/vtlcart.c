@@ -640,8 +640,29 @@ int read_mam(int mam_fd, int mhvtl_fd, struct MAM *mamp) {
 				}
 			}
 
-			/* attribute not known: skip value */
+			/* Not in the static table. A host vendor specific attribute is
+			 * carried as a format byte followed by the value; anything else
+			 * is from a build that knows attributes this one does not.
+			 */
 			if (idx < 0) {
+				if (mam_vendor_attr_range(attr.attribute_id) && attr.length) {
+					uint8_t format;
+					uint8_t value[MAM_VENDOR_ATTR_VALUE_LEN];
+					uint16_t len = attr.length - 1;
+
+					if (len > MAM_VENDOR_ATTR_VALUE_LEN)
+						len = MAM_VENDOR_ATTR_VALUE_LEN;
+
+					if (read(mam_fd, &format, sizeof(format)) != sizeof(format))
+						return -1;
+					if (read(mam_fd, value, len) != len)
+						return -1;
+					if (attr.length - 1 > len)
+						lseek(mam_fd, attr.length - 1 - len, SEEK_CUR);
+
+					mam_vendor_attr_set(mamp, attr.attribute_id, format, value, len);
+					continue;
+				}
 				if (attr.length) lseek(mam_fd, attr.length, SEEK_CUR);
 				continue;
 			}
@@ -720,6 +741,14 @@ int read_mam(int mam_fd, int mhvtl_fd, struct MAM *mamp) {
  * Using a Type-Length-Value format to keep mam auto-descriptive
  * Returns 0 if nothing written or -1 on error
  */
+static int truncate_at_offset(int fd) {
+	off_t end = lseek(fd, 0, SEEK_CUR);
+
+	if (end < 0)
+		return -1;
+	return ftruncate(fd, end);
+}
+
 int write_mam(int mam_fd, int mhvtl_fd) {
 
 	if ((lseek(mam_fd, 0, SEEK_SET) != 0) || (lseek(mhvtl_fd, 0, SEEK_SET) != 0)) {
@@ -748,6 +777,27 @@ int write_mam(int mam_fd, int mhvtl_fd) {
 			return -1;
 	}
 
+	/* Host vendor specific attributes. The record carries the attribute format
+	 * ahead of the value, because unlike the static attributes there is no
+	 * table to recover it from when the medium is read back.
+	 */
+	for (int i = 0; i < mam.vendor_attr_count; i++) {
+		const struct MAM_vendor_attr *attr = &mam.vendor_attr[i];
+		const uint16_t				  len  = attr->length + 1;
+
+		if (write(mam_fd, &attr->attribute_id, sizeof(uint16_t)) != sizeof(uint16_t))
+			return -1;
+
+		if (write(mam_fd, &len, sizeof(uint16_t)) != sizeof(uint16_t))
+			return -1;
+
+		if (write(mam_fd, &attr->format, sizeof(uint8_t)) != sizeof(uint8_t))
+			return -1;
+
+		if (write(mam_fd, attr->value, attr->length) != attr->length)
+			return -1;
+	}
+
 	/* mhvtl attributes */
 	for (int i = 0; i < MAM_MHVTL_ATTRIBUTE_END; i++) {
 		const struct MHVTL_attr *attr = &mam.mhvtl_attr[i];
@@ -764,6 +814,13 @@ int write_mam(int mam_fd, int mhvtl_fd) {
 		if (write(mhvtl_fd, attr->value, attr->length) != attr->length)
 			return -1;
 	}
+
+	/* The vendor attribute section is variable length, so this rewrite may be
+	 * shorter than what the files already hold. Cut any stale tail: the loader
+	 * parses records up to end of file.
+	 */
+	if (truncate_at_offset(mam_fd) || truncate_at_offset(mhvtl_fd))
+		return -1;
 
 	return 0;
 }

@@ -96,7 +96,92 @@ long			   my_id   = 0;
 			.value		  = &(field)};                                        \
 	} while (0)
 
+/* Attributes in the host vendor specific range that the static table does not
+ * describe. See the comment on struct MAM_vendor_attr.
+ */
+int mam_vendor_attr_range(uint16_t attribute_id) {
+	return (attribute_id >= MAM_VENDOR_ATTR_FIRST) &&
+		   (attribute_id <= MAM_VENDOR_ATTR_LAST);
+}
+
+struct MAM_vendor_attr *mam_vendor_attr_find(struct MAM *mamp,
+											 uint16_t	 attribute_id) {
+	uint16_t i;
+
+	for (i = 0; i < mamp->vendor_attr_count; i++)
+		if (mamp->vendor_attr[i].attribute_id == attribute_id)
+			return &mamp->vendor_attr[i];
+
+	return NULL;
+}
+
+/* Drop an attribute, keeping the array sorted and gap free. */
+void mam_vendor_attr_remove(struct MAM *mamp, uint16_t attribute_id) {
+	struct MAM_vendor_attr *attr = mam_vendor_attr_find(mamp, attribute_id);
+	uint16_t				idx;
+
+	if (!attr)
+		return;
+
+	idx = attr - mamp->vendor_attr;
+	memmove(&mamp->vendor_attr[idx], &mamp->vendor_attr[idx + 1],
+			(mamp->vendor_attr_count - idx - 1) * sizeof(*attr));
+	mamp->vendor_attr_count--;
+	memset(&mamp->vendor_attr[mamp->vendor_attr_count], 0, sizeof(*attr));
+}
+
+/* Store or replace an attribute. A zero length removes it, as SSC defines for
+ * a WRITE ATTRIBUTE carrying no value.
+ *
+ * Returns 0 on success, -1 when the value is too long for a slot and -2 when
+ * the medium has no free slot left.
+ */
+int mam_vendor_attr_set(struct MAM *mamp, uint16_t attribute_id, uint8_t format,
+						const uint8_t *value, uint16_t length) {
+	struct MAM_vendor_attr *attr;
+	uint16_t				idx;
+
+	if (!length) {
+		mam_vendor_attr_remove(mamp, attribute_id);
+		return 0;
+	}
+
+	if (length > MAM_VENDOR_ATTR_VALUE_LEN)
+		return -1;
+
+	attr = mam_vendor_attr_find(mamp, attribute_id);
+	if (!attr) {
+		if (mamp->vendor_attr_count >= MAM_VENDOR_ATTR_MAX)
+			return -2;
+
+		/* Insert in ascending attribute id order */
+		for (idx = 0; idx < mamp->vendor_attr_count; idx++)
+			if (mamp->vendor_attr[idx].attribute_id > attribute_id)
+				break;
+
+		memmove(&mamp->vendor_attr[idx + 1], &mamp->vendor_attr[idx],
+				(mamp->vendor_attr_count - idx) * sizeof(*attr));
+		mamp->vendor_attr_count++;
+		attr = &mamp->vendor_attr[idx];
+	}
+
+	memset(attr, 0, sizeof(*attr));
+	attr->attribute_id = attribute_id;
+	attr->format	   = format;
+	attr->length	   = length;
+	memcpy(attr->value, value, length);
+
+	return 0;
+}
+
 void init_mam(struct MAM *mamp) {
+	/* Host vendor specific attributes describe the medium, so start from an
+	 * empty set: this runs for every load and a cartridge must never inherit
+	 * the labels of the one before it.
+	 */
+	mamp->vendor_attr_count = 0;
+	memset(mamp->vendor_attr, 0, sizeof(mamp->vendor_attr));
+
 	/* Device (0x0000 - 0x03ff) */
 	INIT_MAM_ATTR(0x000, 8, 1, 0, mamp->remaining_capacity, MAM_REMAINING_CAPACITY);
 	INIT_MAM_ATTR(0x001, 8, 1, 0, mamp->max_capacity, MAM_MAX_CAPACITY);
@@ -1193,6 +1278,83 @@ char *readline(char *buf, int len, FILE *s) {
 	return ret;
 }
 
+/* Return the value of ' <field>: <value>' from a config file line, or NULL when
+ * the line holds a different field.
+ *
+ * The value runs to the end of the line because it may contain spaces - real
+ * INQUIRY strings such as "HH LTO Gen 8" do - so leading and trailing blanks
+ * are trimmed instead, along with any trailing comment. 'line' is modified in
+ * place to cut those; the returned pointer points into it.
+ */
+char *conf_value(char *line, const char *field) {
+	const char *f = field;
+	char	   *value, *end, *c;
+
+	while (*line == ' ' || *line == '\t')
+		line++;
+
+	/* A space in the field name matches a run of blanks, so tabs or doubled
+	 * spaces in a hand-written file still parse. Unlike the sscanf formats
+	 * this replaces, at least one blank is required.
+	 */
+	while (*f) {
+		if (*f == ' ') {
+			if (*line != ' ' && *line != '\t')
+				return NULL;
+			while (*line == ' ' || *line == '\t')
+				line++;
+			f++;
+		}
+		else if (*line == *f) {
+			line++;
+			f++;
+		}
+		else {
+			return NULL;
+		}
+	}
+
+	value = line;
+	if (*value != ':')
+		return NULL;
+	value++;
+
+	while (*value == ' ' || *value == '\t')
+		value++;
+
+	/* A '#' after a blank starts a comment. Requiring the blank keeps '#'
+	 * usable inside a value.
+	 */
+	for (c = value; c[0] && c[1]; c++)
+		if ((c[0] == ' ' || c[0] == '\t') && c[1] == '#') {
+			c[0] = '\0';
+			break;
+		}
+
+	end = value + strlen(value);
+	while (end > value && (end[-1] == ' ' || end[-1] == '\t' ||
+						   end[-1] == '\r' || end[-1] == '\n'))
+		end--;
+	*end = '\0';
+
+	/* A field with no value carries nothing to apply, so it is ignored */
+	if (end == value)
+		return NULL;
+
+	return value;
+}
+
+/* INQUIRY strings have fixed widths, so a real device cannot carry a longer
+ * value: truncate with a warning rather than refuse to start.
+ */
+void conf_clamp_string(char *s, unsigned int len, int lineno) {
+	if (strlen(s) > len) {
+		MHVTL_LOG("Line %d: value truncated to %u characters: %s",
+				  lineno, len, s);
+		s[len] = '\0';
+	}
+}
+
 /* Copy bytes from 'src' to 'dest, blank-filling to length 'len'.  There will
  * not be a NULL byte at the end.
  */
@@ -1727,8 +1889,8 @@ finished:
 /*
  * How many partitions a cartridge of this media type can hold.
  *
- * LTO-5 and LTO-6 hold two partitions, LTO-7 raised that to four and LTO-8 and
- * LTO-9 kept it. Everything else is described as a single partition.
+ * LTO-5 and LTO-6 hold two partitions, LTO-7 raised that to four and every
+ * later generation kept it. Everything else is described as a single partition.
  */
 uint8_t media_max_partitions(uint8_t media_type) {
 	switch (media_type) {
@@ -1738,6 +1900,8 @@ uint8_t media_max_partitions(uint8_t media_type) {
 	case Media_LTO7:
 	case Media_LTO8:
 	case Media_LTO9:
+	case Media_LTO10:
+	case Media_LTO10P:
 		return 4;
 	default:
 		return 1;
@@ -1766,6 +1930,10 @@ uint64_t media_native_capacity(uint8_t media_type) {
 		return 12000 * GB;
 	case Media_LTO9:
 		return 18000 * GB;
+	case Media_LTO10:
+		return 30000 * GB;
+	case Media_LTO10P: /* Ultrium 10 Premium cartridge */
+		return 40000 * GB;
 	/* set_media_params() uses these media types to stand for the 3592 format
 	 * generations rather than for the WORM cartridges their names suggest:
 	 * J1A -> JA, E05 -> JB, E06 -> JX, E07 -> JK. Each gets the headline
@@ -1834,6 +2002,8 @@ uint64_t media_mam_capacity(uint8_t media_type) {
 	case Media_LTO4:
 		return 4096;
 	case Media_LTO9:
+	case Media_LTO10:
+	case Media_LTO10P:
 		return 16384;
 	default:
 		return 8192;
@@ -1875,7 +2045,7 @@ unsigned int set_media_params(struct MAM *mamp, char *density) {
 	mamp->max_partitions = 1;
 	mamp->num_partitions = 1;
 
-	if (!(strncmp(density, "LTO1", 4))) {
+	if (!(strcmp(density, "LTO1"))) {
 		mamp->MediumDensityCode = medium_density_code_lto1;
 		mamp->MediaType			= Media_LTO1;
 		put_unaligned_be32(384, &mamp->MediumLength);
@@ -1884,7 +2054,7 @@ unsigned int set_media_params(struct MAM *mamp, char *density) {
 		memcpy(&mamp->media_info.density_name, "U-18  ", 6);
 		memcpy(&mamp->AssigningOrganization_1, "LTO-CVE", 7);
 		put_unaligned_be32(4880, &mamp->media_info.bits_per_mm);
-	} else if (!(strncmp(density, "LTO2", 4))) {
+	} else if (!(strcmp(density, "LTO2"))) {
 		mamp->MediumDensityCode = medium_density_code_lto2;
 		mamp->MediaType			= Media_LTO2;
 		put_unaligned_be32(512, &mamp->MediumLength);
@@ -1893,7 +2063,7 @@ unsigned int set_media_params(struct MAM *mamp, char *density) {
 		memcpy(&mamp->media_info.density_name, "U-28  ", 6);
 		memcpy(&mamp->AssigningOrganization_1, "LTO-CVE", 7);
 		put_unaligned_be32(7398, &mamp->media_info.bits_per_mm);
-	} else if (!(strncmp(density, "LTO3", 4))) {
+	} else if (!(strcmp(density, "LTO3"))) {
 		mamp->MediumDensityCode = medium_density_code_lto3;
 		mamp->MediaType			= Media_LTO3;
 		put_unaligned_be32(704, &mamp->MediumLength);
@@ -1902,7 +2072,7 @@ unsigned int set_media_params(struct MAM *mamp, char *density) {
 		memcpy(&mamp->media_info.density_name, "U-316 ", 6);
 		memcpy(&mamp->AssigningOrganization_1, "LTO-CVE", 7);
 		put_unaligned_be32(9638, &mamp->media_info.bits_per_mm);
-	} else if (!(strncmp(density, "LTO4", 4))) {
+	} else if (!(strcmp(density, "LTO4"))) {
 		mamp->MediumDensityCode = medium_density_code_lto4;
 		mamp->MediaType			= Media_LTO4;
 		put_unaligned_be32(896, &mamp->MediumLength);
@@ -1911,7 +2081,7 @@ unsigned int set_media_params(struct MAM *mamp, char *density) {
 		memcpy(&mamp->media_info.density_name, "U-416  ", 6);
 		memcpy(&mamp->AssigningOrganization_1, "LTO-CVE", 7);
 		put_unaligned_be32(12725, &mamp->media_info.bits_per_mm);
-	} else if (!(strncmp(density, "LTO5", 4))) {
+	} else if (!(strcmp(density, "LTO5"))) {
 		mamp->MediumDensityCode = medium_density_code_lto5;
 		mamp->MediaType			= Media_LTO5;
 		put_unaligned_be32(1280, &mamp->MediumLength);
@@ -1921,7 +2091,7 @@ unsigned int set_media_params(struct MAM *mamp, char *density) {
 		memcpy(&mamp->AssigningOrganization_1, "LTO-CVE", 7);
 		put_unaligned_be32(15142, &mamp->media_info.bits_per_mm);
 		mamp->num_partitions = 2;
-	} else if (!(strncmp(density, "LTO6", 4))) {
+	} else if (!(strcmp(density, "LTO6"))) {
 		mamp->MediumDensityCode = medium_density_code_lto6;
 		mamp->MediaType			= Media_LTO6;
 		put_unaligned_be32(2176, &mamp->MediumLength);
@@ -1931,7 +2101,7 @@ unsigned int set_media_params(struct MAM *mamp, char *density) {
 		memcpy(&mamp->AssigningOrganization_1, "LTO-CVE", 7);
 		put_unaligned_be32(18441, &mamp->media_info.bits_per_mm);
 		mamp->num_partitions = 2;
-	} else if (!(strncmp(density, "LTO7", 4))) {
+	} else if (!(strcmp(density, "LTO7"))) {
 		mamp->MediumDensityCode = medium_density_code_lto7;
 		mamp->MediaType			= Media_LTO7;
 		put_unaligned_be32(960, &mamp->MediumLength);
@@ -1941,7 +2111,7 @@ unsigned int set_media_params(struct MAM *mamp, char *density) {
 		memcpy(&mamp->AssigningOrganization_1, "LTO-CVE", 7);
 		put_unaligned_be32(19107, &mamp->media_info.bits_per_mm);
 		mamp->num_partitions = 2;
-	} else if (!(strncmp(density, "LTO8", 4))) {
+	} else if (!(strcmp(density, "LTO8"))) {
 		mamp->MediumDensityCode = medium_density_code_lto8;
 		mamp->MediaType			= Media_LTO8;
 		put_unaligned_be32(960, &mamp->MediumLength);
@@ -1951,7 +2121,7 @@ unsigned int set_media_params(struct MAM *mamp, char *density) {
 		memcpy(&mamp->AssigningOrganization_1, "LTO-CVE", 7);
 		put_unaligned_be32(19107, &mamp->media_info.bits_per_mm);
 		mamp->num_partitions = 2;
-	} else if (!(strncmp(density, "LTO9", 4))) {
+	} else if (!(strcmp(density, "LTO9"))) {
 		mamp->MediumDensityCode = medium_density_code_lto9;
 		mamp->MediaType			= Media_LTO9;
 		put_unaligned_be32(960, &mamp->MediumLength);
@@ -1959,7 +2129,32 @@ unsigned int set_media_params(struct MAM *mamp, char *density) {
 		memcpy(&mamp->media_info.description, "Ultrium 9/32T", 13);
 		memcpy(&mamp->media_info.density_name, "U-932  ", 6);
 		memcpy(&mamp->AssigningOrganization_1, "LTO-CVE", 7);
-		put_unaligned_be32(19107, &mamp->media_info.bits_per_mm);
+		put_unaligned_be32(21459, &mamp->media_info.bits_per_mm);
+		mamp->num_partitions = 2;
+	/* Density names and bit densities are from the IBM LTO SCSI Reference,
+	 * GA32-0928-08 table 114. That table gives no description string and the
+	 * LTO-10 tape length is not published, so the description follows the
+	 * LTO-9 pattern and the length is carried forward as LTO-8 and LTO-9 do.
+	 */
+	} else if (!(strcmp(density, "LTO10"))) {
+		mamp->MediumDensityCode = medium_density_code_lto10;
+		mamp->MediaType			= Media_LTO10;
+		put_unaligned_be32(960, &mamp->MediumLength);
+		put_unaligned_be32(127, &mamp->MediumWidth);
+		memcpy(&mamp->media_info.description, "Ultrium 10/32T", 14);
+		memcpy(&mamp->media_info.density_name, "U1032A ", 6);
+		memcpy(&mamp->AssigningOrganization_1, "LTO-CVE", 7);
+		put_unaligned_be32(21657, &mamp->media_info.bits_per_mm);
+		mamp->num_partitions = 2;
+	} else if (!(strcmp(density, "LTO10P"))) {
+		mamp->MediumDensityCode = medium_density_code_lto10p;
+		mamp->MediaType			= Media_LTO10P;
+		put_unaligned_be32(960, &mamp->MediumLength);
+		put_unaligned_be32(127, &mamp->MediumWidth);
+		memcpy(&mamp->media_info.description, "Ultrium 10/32T P", 16);
+		memcpy(&mamp->media_info.density_name, "U1032P ", 6);
+		memcpy(&mamp->AssigningOrganization_1, "LTO-CVE", 7);
+		put_unaligned_be32(22441, &mamp->media_info.bits_per_mm);
 		mamp->num_partitions = 2;
 	} else if (!(strncmp(density, "AIT1", 4))) {
 		/* Vaules for AIT taken from "Product Manual SDX-900V v1.0" */

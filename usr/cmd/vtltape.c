@@ -144,6 +144,8 @@ static struct tape_drives_table {
 	{"ULT3580-HH8     ", init_ult3580_td8},
 	{"ULT3580-TD9     ", init_ult3580_td9},
 	{"ULT3580-HH9     ", init_ult3580_td9},
+	{"ULT3580-TDA     ", init_ult3580_tda},
+	{"ULT3580-HHA     ", init_ult3580_tda},
 	{"ULTRIUM-TD1     ", init_ult3580_td1},
 	{"ULTRIUM-TD2     ", init_ult3580_td2},
 	{"ULTRIUM-HH2     ", init_ult3580_td2},
@@ -161,6 +163,8 @@ static struct tape_drives_table {
 	{"ULTRIUM-HH8     ", init_ult3580_td8},
 	{"ULTRIUM-TD9     ", init_ult3580_td9},
 	{"ULTRIUM-HH9     ", init_ult3580_td9},
+	{"ULTRIUM-TDA     ", init_ult3580_tda},
+	{"ULTRIUM-HHA     ", init_ult3580_tda},
 	{"Ultrium 1-SCSI  ", init_hp_ult_1},
 	{"Ultrium 2-SCSI  ", init_hp_ult_2},
 	{"Ultrium 3-SCSI  ", init_hp_ult_3},
@@ -444,6 +448,52 @@ static void *mam_attr_value(struct lu_phy_attr *lu, int indx, uint8_t partition,
  *
  * Fill in 'buf' with data and return number of bytes
  */
+/* One attribute of the merged view over the static table and the host vendor
+ * specific store, both sorted by attribute id.
+ */
+struct mam_attr_view {
+	uint16_t					  id;
+	uint16_t					  len;
+	uint8_t						  ro;
+	uint8_t						  format;
+	int							  indx;	  /* static table position, vendor == NULL */
+	const struct MAM_vendor_attr *vendor; /* NULL when from the static table */
+};
+
+/* Yield the next attribute in ascending id order and advance the cursor.
+ * Returns 0 when both sequences are exhausted.
+ */
+static int next_mam_attribute(int *indx, uint16_t *vndx,
+							  struct mam_attr_view *out) {
+	const struct MAM_vendor_attr *vattr =
+		(*vndx < mam.vendor_attr_count) ? &mam.vendor_attr[*vndx] : NULL;
+	int use_vendor;
+
+	if (!mam.attributes[*indx].length && !vattr)
+		return 0;
+
+	use_vendor = vattr && (!mam.attributes[*indx].length ||
+						   vattr->attribute_id < mam.attributes[*indx].attribute_id);
+	if (use_vendor) {
+		out->id		= vattr->attribute_id;
+		out->len	= vattr->length;
+		out->ro		= 0;
+		out->format = vattr->format;
+		out->vendor = vattr;
+		(*vndx)++;
+	}
+	else {
+		out->id		= mam.attributes[*indx].attribute_id;
+		out->len	= mam.attributes[*indx].length;
+		out->ro		= mam.attributes[*indx].read_only;
+		out->format = mam.attributes[*indx].format;
+		out->indx	= *indx;
+		out->vendor = NULL;
+		(*indx)++;
+	}
+	return 1;
+}
+
 int resp_read_attribute(struct scsi_cmd *cmd) {
 	uint8_t		*cdb	  = cmd->scb;
 	uint8_t		*buf	  = cmd->dbuf_p->data;
@@ -453,6 +503,8 @@ int resp_read_attribute(struct scsi_cmd *cmd) {
 	uint32_t	 ret_val	= 4; /* Available data length */
 	unsigned int byte_index = 4;
 	int			 indx, found_attribute;
+	uint16_t	 vndx;
+	struct mam_attr_view attr_view;
 	struct s_sd	 sd;
 	uint8_t		 scratch[8]; /* Holds values which are computed per partition */
 
@@ -463,30 +515,36 @@ int resp_read_attribute(struct scsi_cmd *cmd) {
 
 	memset_ssc_buf(cmd, alloc_len); /* Clear memory */
 
+	/* The static table and the host vendor specific attributes are two sorted
+	 * sequences whose id ranges overlap, so both branches below walk them
+	 * through next_mam_attribute(): SSC requires READ ATTRIBUTE to report
+	 * attributes in ascending attribute id order.
+	 */
+	indx = 0;
+	vndx = 0;
 	if (cdb[1] == 0) {
 		/* Attribute Values */
-		for (indx = found_attribute = 0; mam.attributes[indx].length; indx++) {
-			if (attrib == mam.attributes[indx].attribute_id)
+		found_attribute = 0;
+		while (next_mam_attribute(&indx, &vndx, &attr_view)) {
+			if (attrib == attr_view.id)
 				found_attribute = 1;
 
 			if (found_attribute) {
 				/* calculate available data length */
-				ret_val += mam.attributes[indx].length + 5;
+				ret_val += attr_view.len + 5;
 				if (ret_val <= alloc_len) {
 					/* add it to output */
-					MHVTL_DBG(2, "Attribute : %02x %02x %02x %02x %02x %02x\n",
-							  buf[byte_index], buf[byte_index + 1],
-							  buf[byte_index + 2], buf[byte_index + 3],
-							  buf[byte_index + 4], buf[byte_index + 5]);
-					buf[byte_index++] = mam.attributes[indx].attribute_id >> 8;
-					buf[byte_index++] = mam.attributes[indx].attribute_id;
-					buf[byte_index++] = (mam.attributes[indx].read_only << 7) | mam.attributes[indx].format;
-					buf[byte_index++] = mam.attributes[indx].length >> 8;
-					buf[byte_index++] = mam.attributes[indx].length;
+					buf[byte_index++] = attr_view.id >> 8;
+					buf[byte_index++] = attr_view.id;
+					buf[byte_index++] = (attr_view.ro << 7) | attr_view.format;
+					buf[byte_index++] = attr_view.len >> 8;
+					buf[byte_index++] = attr_view.len;
 					memcpy(&buf[byte_index],
-						   mam_attr_value(cmd->lu, indx, cdb[7], scratch),
-						   mam.attributes[indx].length);
-					byte_index += mam.attributes[indx].length;
+						   attr_view.vendor
+							   ? attr_view.vendor->value
+							   : mam_attr_value(cmd->lu, attr_view.indx, cdb[7], scratch),
+						   attr_view.len);
+					byte_index += attr_view.len;
 				}
 			}
 		}
@@ -500,13 +558,13 @@ int resp_read_attribute(struct scsi_cmd *cmd) {
 		}
 	} else {
 		/* Attribute List */
-		for (indx = found_attribute = 0; mam.attributes[indx].length; indx++) {
+		while (next_mam_attribute(&indx, &vndx, &attr_view)) {
 			/* calculate available data length */
 			ret_val += 2;
 			if (ret_val <= alloc_len) {
 				/* add it to output */
-				buf[byte_index++] = mam.attributes[indx].attribute_id >> 8;
-				buf[byte_index++] = mam.attributes[indx].attribute_id;
+				buf[byte_index++] = attr_view.id >> 8;
+				buf[byte_index++] = attr_view.id;
 			}
 		}
 	}
@@ -548,6 +606,14 @@ int resp_write_attribute(struct scsi_cmd *cmd) {
 	memcpy(&mam_backup, mamp, sizeof(struct MAM)); /* In case of error, keep former state of mam */
 
 	for (byte_index = 4; byte_index < alloc_len;) {
+		/* Each entry carries at least the five byte header */
+		if (byte_index + 5 > alloc_len) {
+			memcpy(mamp, &mam_backup, sizeof(struct MAM));
+			sd.byte0		 = SKSV;
+			sd.field_pointer = byte_index;
+			sam_illegal_request(E_PARAMETER_LIST_LENGTH_ERR, &sd, sam_stat);
+			return 0;
+		}
 		attrib = get_unaligned_be16(&buf[byte_index]);
 
 		for (indx = found_attribute = 0; mam.attributes[indx].length; indx++) {
@@ -555,6 +621,14 @@ int resp_write_attribute(struct scsi_cmd *cmd) {
 				found_attribute	 = 1;
 				attribute_length = get_unaligned_be16(&buf[byte_index + 3]);
 				byte_index += 5;		 /* positioning to the actual value */
+				if (byte_index + attribute_length > alloc_len) {
+					memcpy(mamp, &mam_backup, sizeof(struct MAM));
+					sd.byte0		 = SKSV;
+					sd.field_pointer = byte_index - 2;
+					sam_illegal_request(E_PARAMETER_LIST_LENGTH_ERR, &sd,
+										sam_stat);
+					return 0;
+				}
 				if ((attrib == 0x408) && /* Attribute == Medium Type */
 					(attribute_length == 1) &&
 					(buf[byte_index] == 0x80)) {
@@ -591,6 +665,41 @@ int resp_write_attribute(struct scsi_cmd *cmd) {
 				sd.field_pointer = indx;
 			}
 		}
+		if (!found_attribute && mam_vendor_attr_range(attrib)) {
+			/* Not described by the static table, but the application owns
+			 * this range and may store what it likes there.
+			 */
+			const uint8_t format = buf[byte_index + 2] & 0x03;
+			int			  res;
+
+			attribute_length = get_unaligned_be16(&buf[byte_index + 3]);
+			byte_index += 5;
+			if (byte_index + attribute_length > alloc_len) {
+				memcpy(mamp, &mam_backup, sizeof(struct MAM));
+				sd.byte0		 = SKSV;
+				sd.field_pointer = byte_index - 2;
+				sam_illegal_request(E_PARAMETER_LIST_LENGTH_ERR, &sd, sam_stat);
+				return 0;
+			}
+
+			res = mam_vendor_attr_set(mamp, attrib, format, &buf[byte_index],
+									  attribute_length);
+			if (res) {
+				MHVTL_LOG("Cannot store vendor attribute 0x%04x, length %d: %s",
+						  attrib, attribute_length,
+						  (res == -1) ? "value too long" : "no space in MAM");
+				memcpy(mamp, &mam_backup, sizeof(struct MAM));
+				sd.byte0		 = SKSV;
+				sd.field_pointer = byte_index - 5;
+				sam_illegal_request(E_INVALID_FIELD_IN_PARMS, &sd, sam_stat);
+				return 0;
+			}
+			MHVTL_DBG(2, "Stored vendor attribute 0x%04x, length %d",
+					  attrib, attribute_length);
+			byte_index += attribute_length;
+			found_attribute = 1;
+		}
+
 		if (!found_attribute) {
 			memcpy(mamp, &mam_backup, sizeof(struct MAM));
 			sd.byte0 = SKSV;
@@ -1840,31 +1949,31 @@ static struct device_type_template ssc_ops = {
 
 		/* 0x00 -> 0x0f */
 		SCSI_OP(0x00, ssc_tur),
-		SCSI_OP(0x01, ssc_rewind),
+		SCSI_OP_TO(0x01, ssc_rewind, MHVTL_LONG_CMD_TIMEOUT),
 		SCSI_OP(0x03, spc_request_sense),
-		SCSI_OP(0x04, ssc_format_medium),
+		SCSI_OP_TO(0x04, ssc_format_medium, MHVTL_LONG_CMD_TIMEOUT),
 		SCSI_OP(0x05, ssc_read_block_limits),
 		SCSI_OP(0x08, ssc_read_6),
 		SCSI_OP(0x0a, ssc_write_6),
 		SCSI_OP(0x0b, ssc_set_capacity),
 
 		/* 0x10 -> 0x1f */
-		SCSI_OP(0x10, ssc_write_filemarks),
-		SCSI_OP(0x11, ssc_space_6),
+		SCSI_OP_TO(0x10, ssc_write_filemarks, MHVTL_LONG_CMD_TIMEOUT),
+		SCSI_OP_TO(0x11, ssc_space_6, MHVTL_LONG_CMD_TIMEOUT),
 		SCSI_OP(0x12, spc_inquiry),
 		SCSI_OP(0x13, ssc_verify_6),
 		SCSI_OP(0x15, ssc_mode_select),
 		SCSI_OP(0x16, ssc_reserve),
 		SCSI_OP(0x17, ssc_release),
-		SCSI_OP(0x19, ssc_erase),
+		SCSI_OP_TO(0x19, ssc_erase, MHVTL_LONG_CMD_TIMEOUT),
 		SCSI_OP(0x1a, spc_mode_sense),
-		SCSI_OP(0x1b, ssc_load_unload),
+		SCSI_OP_TO(0x1b, ssc_load_unload, MHVTL_LONG_CMD_TIMEOUT),
 		SCSI_OP(0x1c, ssc_recv_diagnostics),
 		SCSI_OP(0x1d, ssc_send_diagnostics),
 		SCSI_OP(0x1e, ssc_allow_prevent_removal),
 
 		/* 0x20 -> 0x2f */
-		SCSI_OP(0x2b, ssc_locate),
+		SCSI_OP_TO(0x2b, ssc_locate, MHVTL_LONG_CMD_TIMEOUT),
 
 		/* 0x30 -> 0x3f */
 		SCSI_OP(0x34, ssc_read_position),
@@ -1889,8 +1998,8 @@ static struct device_type_template ssc_ops = {
 		SCSI_OP(0x8d, ssc_write_attributes),
 
 		/* 0x90 -> 0x9f */
-		SCSI_OP(0x91, ssc_space_16),
-		SCSI_OP(0x92, ssc_locate),
+		SCSI_OP_TO(0x91, ssc_space_16, MHVTL_LONG_CMD_TIMEOUT),
+		SCSI_OP_TO(0x92, ssc_locate, MHVTL_LONG_CMD_TIMEOUT),
 
 		/* 0xa0 -> 0xaf */
 		SCSI_OP(0xa0, spc_illegal_op), /* processed in the kernel module */
@@ -1905,16 +2014,6 @@ static struct device_type_template ssc_ops = {
 		/* 0xf0 -> 0xff */
 	}};
 
-/*
- * Update ops[xx] with new/updated/custom function 'f'
- */
-void register_ops(struct lu_phy_attr *lu, int op,
-				  void *f, void *g, void *h) {
-	lu->scsi_ops->ops[op].cmd_perform	   = f;
-	lu->scsi_ops->ops[op].pre_cmd_perform  = g;
-	lu->scsi_ops->ops[op].post_cmd_perform = h;
-}
-
 #define MALLOC_SZ 512
 static int init_lu(struct lu_phy_attr *lu, unsigned minor, struct mhvtl_ctl *ctl) {
 	struct vpd **lu_vpd = lu->lu_vpd;
@@ -1922,7 +2021,6 @@ static int init_lu(struct lu_phy_attr *lu, unsigned minor, struct mhvtl_ctl *ctl
 	char			 device_conf[CONF_FILE_SZ];
 	FILE			*conf;
 	char			*b; /* Read from file into this buffer */
-	char			*s; /* Somewhere for sscanf to store results */
 	int				 indx;
 	struct mhvtl_ctl tmpctl;
 	int				 found = 0;
@@ -1971,11 +2069,6 @@ static int init_lu(struct lu_phy_attr *lu, unsigned minor, struct mhvtl_ctl *ctl
 		perror("Can not open config file");
 		exit(1);
 	}
-	s = zalloc(MALLOC_SZ);
-	if (!s) {
-		perror("Could not allocate memory");
-		exit(1);
-	}
 	b = zalloc(MALLOC_SZ);
 	if (!b) {
 		perror("Could not allocate memory");
@@ -2003,46 +2096,50 @@ static int init_lu(struct lu_phy_attr *lu, unsigned minor, struct mhvtl_ctl *ctl
 		if (indx == minor) {
 			unsigned int c, d, e, f, g, h, j, k;
 			int			 i;
+			char		*v;
 
-			memset(s, 0x20, MALLOC_SZ);
-
-			if (sscanf(b, " Unit serial number: %s", s)) {
-				checkstrlen(s, SCSI_SN_LEN, linecount);
-				snprintf(lu->lu_serial_no, sizeof(lu->lu_serial_no), "%-10s", s);
+			v = conf_value(b, "Unit serial number");
+			if (v) {
+				conf_clamp_string(v, SCSI_SN_LEN, linecount);
+				snprintf(lu->lu_serial_no, sizeof(lu->lu_serial_no), "%-10s", v);
 			}
-			if (sscanf(b, " Vendor identification: %s", s)) {
-				checkstrlen(s, VENDOR_ID_LEN, linecount);
-				snprintf(lu->vendor_id, VENDOR_ID_LEN + 1, "%-8s", s);
-				snprintf(&lu->inquiry[8], VENDOR_ID_LEN + 1, "%-8s", s);
+			v = conf_value(b, "Vendor identification");
+			if (v) {
+				conf_clamp_string(v, VENDOR_ID_LEN, linecount);
+				snprintf(lu->vendor_id, VENDOR_ID_LEN + 1, "%-8s", v);
+				snprintf(&lu->inquiry[8], VENDOR_ID_LEN + 1, "%-8s", v);
 			}
-			if (sscanf(b, " Product identification: %16c", s)) {
-				/* sscanf does not NULL terminate */
-				/* 25 is len of ' Product identification: ' */
-				s[strlen(b) - 25] = '\0';
-				checkstrlen(s, PRODUCT_ID_LEN, linecount);
-				snprintf(lu->product_id, PRODUCT_ID_LEN + 1, "%-16s", s);
-				snprintf(&lu->inquiry[16], PRODUCT_ID_LEN + 1, "%-16s", s);
+			v = conf_value(b, "Product identification");
+			if (v) {
+				conf_clamp_string(v, PRODUCT_ID_LEN, linecount);
+				snprintf(lu->product_id, PRODUCT_ID_LEN + 1, "%-16s", v);
+				snprintf(&lu->inquiry[16], PRODUCT_ID_LEN + 1, "%-16s", v);
 			}
-			if (sscanf(b, " Product revision level: %s", s)) {
-				checkstrlen(s, PRODUCT_REV_LEN, linecount);
-				snprintf(&lu->inquiry[32], PRODUCT_REV_LEN + 1, "%-4s", s);
+			v = conf_value(b, "Product revision level");
+			if (v) {
+				conf_clamp_string(v, PRODUCT_REV_LEN, linecount);
+				snprintf(&lu->inquiry[32], PRODUCT_REV_LEN + 1, "%-4s", v);
 			}
-			if (sscanf(b, " Library ID: %d", &library_id)) {
+			v = conf_value(b, "Library ID");
+			if (v && sscanf(v, "%d", &library_id)) {
 				MHVTL_DBG(2, "Library ID: %d", library_id);
 			}
-			if (sscanf(b, " LBP RSCRC BE: %d", &lbp_rscrc_be)) {
+			v = conf_value(b, "LBP RSCRC BE");
+			if (v && sscanf(v, "%d", &lbp_rscrc_be)) {
 				MHVTL_DBG(2, "Logical Block Protection RSCRC: %d", lbp_rscrc_be);
 			}
-			if (sscanf(b, " Backoff: %d", &i)) {
+			v = conf_value(b, "Backoff");
+			if (v && sscanf(v, "%d", &i)) {
 				if ((i > 1) && (i < 10000)) {
 					MHVTL_DBG(1, "Backoff value: %d", i);
 					backoff = i;
 				}
 			}
-			if (sscanf(b, " Compression type: %s", s)) {
-				if (!strncasecmp(s, "lzo", 3))
+			v = conf_value(b, "Compression type");
+			if (v) {
+				if (!strncasecmp(v, "lzo", 3))
 					lu_ssc.compressionType = LZO;
-				if (!strncasecmp(s, "zlib", 4))
+				if (!strncasecmp(v, "zlib", 4))
 					lu_ssc.compressionType = ZLIB;
 				MHVTL_DBG(2, "Compression set to %s",
 						  (lu_ssc.compressionType == LZO) ? "LZO" : "ZLIB");
@@ -2057,8 +2154,9 @@ static int init_lu(struct lu_phy_attr *lu, unsigned minor, struct mhvtl_ctl *ctl
 				else
 					lu_ssc.configCompressionFactor = 0;
 			}
-			if (sscanf(b, " fifo: %s", s))
-				process_fifoname(lu, s, 0);
+			v = conf_value(b, "fifo");
+			if (v)
+				process_fifoname(lu, v, 0);
 			i = sscanf(b,
 					   " NAA: %02x:%02x:%02x:%02x:%02x:%02x:%02x:%02x",
 					   &c, &d, &e, &f, &g, &h, &j, &k);
@@ -2086,7 +2184,6 @@ static int init_lu(struct lu_phy_attr *lu, unsigned minor, struct mhvtl_ctl *ctl
 	}
 	fclose(conf);
 	free(b);
-	free(s);
 
 	if (found && !lu->inquiry[32]) {
 		char *v;

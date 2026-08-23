@@ -22,10 +22,9 @@ WORKDIR /mhvtl/usr
 RUN make && make install
 
 # same for /etc (allows vtltape@/vtllibrary@ to work)
-# the sed commmands is here to disable the SELinux line
+# semanage needs no masking: the Makefile only calls it on a live SELinux system
 WORKDIR /mhvtl/etc
-RUN sed -i 's/semanage/#semanage/g' Makefile && \
-    make install
+RUN make install
 
 # Install systemd service definitions from the source tree, not from the
 # container's own /etc, which never held them.

@@ -14,7 +14,7 @@ GENERATE_DEVICE_CONF = generate_device_conf
 GENERATE_LIB_CONTENTS = generate_library_contents
 GENERATORS = $(GENERATE_DEVICE_CONF) $(GENERATE_LIB_CONTENTS)
 
-SERVICES = $(patsubst %.in,%,$(wildcard *.service*))
+SERVICES = $(patsubst %.in,%,$(wildcard *.service.in))
 MHVTL_TARGET = mhvtl.target
 
 
@@ -52,16 +52,18 @@ $(DESTDIR)$(SYSTEMD_SERVICE_DIR):
 	install -d -m 755 $@
 $(DESTDIR)$(MHVTL_CONFIG_PATH):
 	install -d -m 755 $@
+$(DESTDIR)$(PREFIX)/bin:
+	install -d -m 755 $@
 
 # Installing services
 $(DESTDIR)$(SYSTEMD_SERVICE_DIR)/%.service: %.service | $(DESTDIR)$(SYSTEMD_SERVICE_DIR)
 	install -m 644 $< $@
-	semanage fcontext -a -t systemd_unit_file_t \'$@\'
+	$(call SEMANAGE_UNIT,$@)
 $(DESTDIR)$(SYSTEMD_SERVICE_DIR)/%.target: %.target | $(DESTDIR)$(SYSTEMD_SERVICE_DIR)
 	install -m 644 $< $@
-	semanage fcontext -a -t systemd_unit_file_t \'$@\'
+	$(call SEMANAGE_UNIT,$@)
 # Installing generator of config files
-$(DESTDIR)/usr/bin/generate_%: generate_%
+$(DESTDIR)$(PREFIX)/bin/generate_%: generate_% | $(DESTDIR)$(PREFIX)/bin
 	install -m 755 $< $@
 # save backup copies of config files
 $(DESTDIR)$(MHVTL_CONFIG_PATH)/%: % | $(DESTDIR)$(MHVTL_CONFIG_PATH)
@@ -71,5 +73,27 @@ $(DESTDIR)$(MHVTL_CONFIG_PATH)/%: % | $(DESTDIR)$(MHVTL_CONFIG_PATH)
 install: all \
 		 $(addprefix $(DESTDIR)$(SYSTEMD_SERVICE_DIR)/,$(SERVICES) $(MHVTL_TARGET)) \
 		 $(addprefix $(DESTDIR)$(MHVTL_CONFIG_PATH)/,$(CONFIGS)) \
-		 $(addprefix $(DESTDIR)/usr/bin/,$(GENERATORS))
-	restorecon -R -v  $(DESTDIR)$(SYSTEMD_SERVICE_DIR)
+		 $(addprefix $(DESTDIR)$(PREFIX)/bin/,$(GENERATORS))
+	$(call RESTORECON_TREE,$(SYSTEMD_SERVICE_DIR))
+
+# The configuration under $(MHVTL_CONFIG_PATH) describes the libraries the user
+# built, so it is kept unless PURGE_CONFIG is set.
+.PHONY: uninstall
+uninstall:
+	$(RM) $(addprefix $(DESTDIR)$(SYSTEMD_SERVICE_DIR)/,$(SERVICES) $(MHVTL_TARGET))
+	$(RM) $(addprefix $(DESTDIR)$(PREFIX)/bin/,$(GENERATORS))
+ifneq ($(PREFIX)/bin,/usr/bin)
+	# Earlier releases installed the generators into /usr/bin regardless of PREFIX
+	$(RM) $(addprefix $(DESTDIR)/usr/bin/,$(GENERATORS))
+endif
+	if $(HAVE_SEMANAGE); then \
+		for unit in $(SERVICES) $(MHVTL_TARGET); do \
+			semanage fcontext -d "$(SYSTEMD_SERVICE_DIR)/$$unit" || true; \
+		done; \
+	fi
+ifeq ($(PURGE_CONFIG),)
+	@echo "Left in place: $(DESTDIR)$(MHVTL_CONFIG_PATH) (use PURGE_CONFIG=1 to remove)"
+else
+	$(RM) $(addprefix $(DESTDIR)$(MHVTL_CONFIG_PATH)/,$(CONFIGS))
+	$(RM) $(addsuffix .orig,$(addprefix $(DESTDIR)$(MHVTL_CONFIG_PATH)/,$(CONFIGS)))
+endif
