@@ -1,0 +1,24 @@
+# The kernel module follows the Linux kernel coding style, not the userspace
+# style of the top level .clang-format. Keep this file so running clang-format
+# over the tree does not reformat these sources into the userspace style.
+BasedOnStyle: LLVM
+
+AlignEscapedNewlines: Left
+AlignTrailingComments: false
+AllowShortBlocksOnASingleLine: Never
+AllowShortCaseLabelsOnASingleLine: false
+AllowShortFunctionsOnASingleLine: None
+AllowShortIfStatementsOnASingleLine: false
+AllowShortLoopsOnASingleLine: false
+AlwaysBreakBeforeMultilineStrings: false
+BreakBeforeBraces: Linux
+BreakStringLiterals: false
+ColumnLimit: 80
+ContinuationIndentWidth: 8
+Cpp11BracedListStyle: false
+IncludeBlocks: Preserve
+IndentWidth: 8
+SortIncludes: false
+SpaceBeforeParens: ControlStatements
+TabWidth: 8
+UseTab: Always

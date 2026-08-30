@@ -392,16 +392,16 @@ static const struct file_operations mhvtl_fops = {
 	.release = mhvtl_release,
 };
 
+/* The variants for 2.6.26 and earlier used kmap()/kmap_atomic() with the
+ * KM_* slot arguments and the pre-2.6.24 sg->page member, none of which the
+ * kernel still provides, so they could not build in any case.
+ */
 #if LINUX_VERSION_CODE > KERNEL_VERSION(4, 17, 0)
 #include "fetch50.c"
 #elif LINUX_VERSION_CODE > KERNEL_VERSION(2, 6, 26)
 #include "fetch27.c"
-#elif LINUX_VERSION_CODE == KERNEL_VERSION(2, 6, 26)
-#include "fetch26.c"
-#elif LINUX_VERSION_CODE > KERNEL_VERSION(2, 6, 23)
-#include "fetch24.c"
 #else
-#include "fetch.c"
+#error "mhvtl requires Linux 2.6.27 or later"
 #endif
 
 /**********************************************************************
@@ -490,15 +490,16 @@ static void mhvtl_debug_queued_list(struct mhvtl_lu_info *lu) {
 }
 
 static struct mhvtl_hba_info *mhvtl_get_hba_entry(void) {
+	unsigned long hba_iflags;
 	struct mhvtl_hba_info *mhvtl_hba;
 
-	spin_lock(&mhvtl_hba_list_lock);
+	spin_lock_irqsave(&mhvtl_hba_list_lock, hba_iflags);
 	if (list_empty(&mhvtl_hba_list))
 		mhvtl_hba = NULL;
 	else
 		mhvtl_hba = list_entry(mhvtl_hba_list.prev,
 							   struct mhvtl_hba_info, hba_sibling);
-	spin_unlock(&mhvtl_hba_list_lock);
+	spin_unlock_irqrestore(&mhvtl_hba_list_lock, hba_iflags);
 	return mhvtl_hba;
 }
 
@@ -866,6 +867,7 @@ static int mhvtl_sdev_configure(struct scsi_device *sdp)
 
 static void mhvtl_sdev_destroy(struct scsi_device *sdp) {
 	struct mhvtl_lu_info *lu = (struct mhvtl_lu_info *)sdp->hostdata;
+	unsigned long		  iflags;
 
 	pr_notice("<%u %u %u %llu>\n",
 			  sdp->host->host_no, sdp->channel, sdp->id,
@@ -873,7 +875,16 @@ static void mhvtl_sdev_destroy(struct scsi_device *sdp) {
 	if (lu) {
 		pr_debug("Removing lu structure, minor %d\n", lu->minor);
 		/* make this slot avaliable for re-use */
-		devp[lu->minor] = NULL;
+		if (lu->minor < DEF_MAX_MINOR_NO)
+			devp[lu->minor] = NULL;
+		/* Unlink before freeing. mhvtl_driver_remove() walks this same
+		 * list after scsi_remove_host() has destroyed every device, so
+		 * leaving the entry linked makes it dereference and free memory
+		 * that is already gone.
+		 */
+		spin_lock_irqsave(&mhvtl_hba_list_lock, iflags);
+		list_del_init(&lu->lu_sibling);
+		spin_unlock_irqrestore(&mhvtl_hba_list_lock, iflags);
 		kfree(sdp->hostdata);
 		sdp->hostdata = NULL;
 	}
@@ -948,17 +959,18 @@ static int mhvtl_bus_reset(struct scsi_cmnd *SCpnt) {
 }
 
 static int mhvtl_host_reset(struct scsi_cmnd *SCpnt) {
+	unsigned long hba_iflags;
 	struct mhvtl_hba_info *mhvtl_hba;
 	struct mhvtl_lu_info  *lu;
 
 	pr_notice("Host reset called\n");
 	++num_host_resets;
-	spin_lock(&mhvtl_hba_list_lock);
+	spin_lock_irqsave(&mhvtl_hba_list_lock, hba_iflags);
 	list_for_each_entry(mhvtl_hba, &mhvtl_hba_list, hba_sibling) {
 		list_for_each_entry(lu, &mhvtl_hba->lu_list, lu_sibling)
 			lu->reset = 1;
 	}
-	spin_unlock(&mhvtl_hba_list_lock);
+	spin_unlock_irqrestore(&mhvtl_hba_list_lock, hba_iflags);
 	mhvtl_stop_all_queued();
 	return SUCCESS;
 }
@@ -975,16 +987,56 @@ static int mhvtl_stop_queued_cmnd(struct scsi_cmnd *SCpnt) {
 	spin_lock_irqsave(&lu->cmd_list_lock, iflags);
 	list_for_each_entry_safe(sqcp, n, &lu->cmd_list, queued_sibling) {
 		if (sqcp->state && (SCpnt == sqcp->a_cmnd)) {
-			timer_delete_sync(&sqcp->cmnd_timer);
+			/* Unlink under the lock so no other path can reach it, then
+			 * release the lock before waiting for the timer: the timer
+			 * handler takes this same lock, so waiting for it here would
+			 * deadlock.
+			 */
+			list_del(&sqcp->queued_sibling);
 			sqcp->state	 = CMD_STATE_FREE;
 			sqcp->a_cmnd = NULL;
 			found		 = 1;
-			__mhvtl_remove_sqcp(sqcp);
 			break;
 		}
 	}
 	spin_unlock_irqrestore(&lu->cmd_list_lock, iflags);
+
+	if (found) {
+		timer_delete_sync(&sqcp->cmnd_timer);
+		kfree(sqcp);
+	}
 	return found;
+}
+
+/* Complete every command still outstanding on this logical unit.
+ *
+ * A removal that simply unlinks the unit strands its commands: the daemon can
+ * no longer be asked for a response, and the expiry timer looks its command up
+ * by walking lu_list, so it no longer finds it either. Nothing then completes
+ * the scsi_cmnd and scsi_remove_device() waits for the queue to drain for ever,
+ * in uninterruptible sleep.
+ */
+static void mhvtl_fail_queued_cmnds(struct mhvtl_lu_info *lu) {
+	struct mhvtl_queued_cmd *sqcp, *n;
+	unsigned long			 iflags;
+	LIST_HEAD(dead);
+
+	spin_lock_irqsave(&lu->cmd_list_lock, iflags);
+	list_for_each_entry_safe(sqcp, n, &lu->cmd_list, queued_sibling) {
+		sqcp->state = CMD_STATE_FREE;
+		list_move(&sqcp->queued_sibling, &dead);
+	}
+	spin_unlock_irqrestore(&lu->cmd_list_lock, iflags);
+
+	list_for_each_entry_safe(sqcp, n, &dead, queued_sibling) {
+		timer_delete_sync(&sqcp->cmnd_timer);
+		if (sqcp->done_funct && sqcp->a_cmnd) {
+			sqcp->a_cmnd->result = DID_NO_CONNECT << 16;
+			sqcp->done_funct(sqcp->a_cmnd);
+		}
+		list_del(&sqcp->queued_sibling);
+		kfree(sqcp);
+	}
 }
 
 /* Deletes (stops) timers of all queued commands */
@@ -993,6 +1045,7 @@ static void mhvtl_stop_all_queued(void) {
 	struct mhvtl_queued_cmd *sqcp, *n;
 	struct mhvtl_hba_info	*mhvtl_hba;
 	struct mhvtl_lu_info	*lu;
+	LIST_HEAD(dead);
 
 	mhvtl_hba = mhvtl_get_hba_entry();
 	if (!mhvtl_hba)
@@ -1003,13 +1056,19 @@ static void mhvtl_stop_all_queued(void) {
 		list_for_each_entry_safe(sqcp, n, &lu->cmd_list,
 								 queued_sibling) {
 			if (sqcp->state && sqcp->a_cmnd) {
-				timer_delete_sync(&sqcp->cmnd_timer);
 				sqcp->state	 = CMD_STATE_FREE;
 				sqcp->a_cmnd = NULL;
-				__mhvtl_remove_sqcp(sqcp);
+				list_move(&sqcp->queued_sibling, &dead);
 			}
 		}
 		spin_unlock_irqrestore(&lu->cmd_list_lock, iflags);
+	}
+
+	/* Timers are drained with no lock held - the handler takes cmd_list_lock */
+	list_for_each_entry_safe(sqcp, n, &dead, queued_sibling) {
+		timer_delete_sync(&sqcp->cmnd_timer);
+		list_del(&sqcp->queued_sibling);
+		kfree(sqcp);
 	}
 }
 
@@ -1035,6 +1094,7 @@ struct scsi_device *__scsi_add_device(struct Scsi_Host *hpnt, uint channel, uint
  *   -> sdev_configure()
  */
 static int mhvtl_add_device(unsigned int minor, struct mhvtl_ctl *ctl) {
+	unsigned long hba_iflags;
 	struct Scsi_Host	  *hpnt;
 	struct mhvtl_hba_info *mhvtl_hba;
 	struct mhvtl_lu_info  *lu;
@@ -1088,9 +1148,9 @@ static int mhvtl_add_device(unsigned int minor, struct mhvtl_ctl *ctl) {
 	lu->sense_buff[7] = 0xa;
 	devp[minor]		  = lu;
 
-	spin_lock(&mhvtl_hba_list_lock);
+	spin_lock_irqsave(&mhvtl_hba_list_lock, hba_iflags);
 	list_add_tail(&lu->lu_sibling, &mhvtl_hba->lu_list);
-	spin_unlock(&mhvtl_hba_list_lock);
+	spin_unlock_irqrestore(&mhvtl_hba_list_lock, hba_iflags);
 
 	pr_debug("Added lu: %p to devp[%d]\n", lu, minor);
 
@@ -1166,15 +1226,28 @@ static ssize_t add_lu_store(struct device_driver *ddp,
 	int				 retval;
 	unsigned int	 minor;
 	struct mhvtl_ctl ctl;
-	char			 str[512];
 
 	if (strncmp(buf, "add", 3)) {
 		pr_err("Invalid command: %s\n", buf);
 		return count;
 	}
 
-	retval = sscanf(buf, "%s %u %d %d %d",
-					str, &minor, &ctl.channel, &ctl.id, &ctl.lun);
+	/* Parse past the verb: an unbounded %s here would overflow whatever
+	 * buffer it was given, and every field must be present before any of
+	 * them is used.
+	 */
+	retval = sscanf(buf + 3, "%u %d %d %d",
+					&minor, &ctl.channel, &ctl.id, &ctl.lun);
+	if (retval != 4) {
+		pr_err("Invalid command: %s\n", buf);
+		return count;
+	}
+
+	if (minor >= DEF_MAX_MINOR_NO) {
+		pr_err("Minor number %u out of range [0..%d]\n",
+			   minor, DEF_MAX_MINOR_NO - 1);
+		return count;
+	}
 
 	pr_debug("Calling 'mhvtl_add_device(minor: %u,"
 			 " Channel: %d, ID: %d, LUN: %d)\n",
@@ -1361,6 +1434,7 @@ static void mhvtl_release_adapter(struct device *dev) {
  * Changed so it only adds one hba instance and no logical units
  */
 static int mhvtl_add_adapter(void) {
+	unsigned long hba_iflags;
 	int					   error = 0;
 	struct mhvtl_hba_info *mhvtl_hba;
 
@@ -1374,9 +1448,9 @@ static int mhvtl_add_adapter(void) {
 	memset(mhvtl_hba, 0, sizeof(*mhvtl_hba));
 	INIT_LIST_HEAD(&mhvtl_hba->lu_list);
 
-	spin_lock(&mhvtl_hba_list_lock);
+	spin_lock_irqsave(&mhvtl_hba_list_lock, hba_iflags);
 	list_add_tail(&mhvtl_hba->hba_sibling, &mhvtl_hba_list);
-	spin_unlock(&mhvtl_hba_list_lock);
+	spin_unlock_irqrestore(&mhvtl_hba_list_lock, hba_iflags);
 
 	mhvtl_hba->dev.bus	   = &mhvtl_pseudo_lld_bus;
 	mhvtl_hba->dev.parent  = &mhvtl_pseudo_primary;
@@ -1399,15 +1473,16 @@ static int mhvtl_add_adapter(void) {
 }
 
 static void mhvtl_remove_adapter(void) {
+	unsigned long hba_iflags;
 	struct mhvtl_hba_info *mhvtl_hba = NULL;
 
-	spin_lock(&mhvtl_hba_list_lock);
+	spin_lock_irqsave(&mhvtl_hba_list_lock, hba_iflags);
 	if (!list_empty(&mhvtl_hba_list)) {
 		mhvtl_hba = list_entry(mhvtl_hba_list.prev,
 							   struct mhvtl_hba_info, hba_sibling);
 		list_del(&mhvtl_hba->hba_sibling);
 	}
-	spin_unlock(&mhvtl_hba_list_lock);
+	spin_unlock_irqrestore(&mhvtl_hba_list_lock, hba_iflags);
 
 	if (!mhvtl_hba)
 		return;
@@ -1449,6 +1524,40 @@ static int mhvtl_driver_probe(struct device *dev) {
 	return error;
 }
 
+/* Drop the scsi_device reference __scsi_add_device() returned for each LU.
+ * Runs before scsi_remove_host() so the devices can actually be freed.
+ */
+static void mhvtl_put_lu_devices(struct mhvtl_hba_info *mhvtl_hba) {
+	struct mhvtl_lu_info *lu;
+	struct scsi_device	 *sdev;
+	unsigned long		  hba_iflags;
+
+	/* scsi_device_put() can sleep, so it must not run under the list lock,
+	 * and the list must not be walked across a release of it. Claim one
+	 * device per pass instead; each pass clears one lu->sdev, so this
+	 * terminates.
+	 */
+	do {
+		sdev = NULL;
+
+		spin_lock_irqsave(&mhvtl_hba_list_lock, hba_iflags);
+		list_for_each_entry(lu, &mhvtl_hba->lu_list, lu_sibling) {
+			spin_lock(&lu->sdev_lock);
+			if (lu->sdev) {
+				sdev	 = lu->sdev;
+				lu->sdev = NULL;
+			}
+			spin_unlock(&lu->sdev_lock);
+			if (sdev)
+				break;
+		}
+		spin_unlock_irqrestore(&mhvtl_hba_list_lock, hba_iflags);
+
+		if (sdev)
+			scsi_device_put(sdev);
+	} while (sdev);
+}
+
 static int mhvtl_driver_remove(struct device *dev) {
 	struct list_head	  *lh, *lh_sf;
 	struct mhvtl_hba_info *mhvtl_hba;
@@ -1461,12 +1570,27 @@ static int mhvtl_driver_remove(struct device *dev) {
 		return -ENODEV;
 	}
 
+	/* Return the reference __scsi_add_device() handed us for every LU.
+	 * Only the VTL_REMOVE_LU ioctl used to do this, so tearing the adapter
+	 * down any other way left each scsi_device - and through it the host,
+	 * which pins this module - referenced forever, making rmmod impossible.
+	 */
+	mhvtl_put_lu_devices(mhvtl_hba);
+
 	scsi_remove_host(mhvtl_hba->shost);
 
+	/* sdev_destroy() unlinks and frees each LU, so this normally finds an
+	 * empty list; it still runs for LUs that never had a scsi_device.
+	 */
 	list_for_each_safe(lh, lh_sf, &mhvtl_hba->lu_list) {
 		lu = list_entry(lh, struct mhvtl_lu_info,
 						lu_sibling);
 		list_del(&lu->lu_sibling);
+		/* Leaving the slot occupied would make this minor unusable for
+		 * the rest of the module's life.
+		 */
+		if (lu->minor < DEF_MAX_MINOR_NO && devp[lu->minor] == lu)
+			devp[lu->minor] = NULL;
 		kfree(lu);
 	}
 
@@ -1578,27 +1702,33 @@ give_up:
 }
 
 static int send_mhvtl_header(unsigned int minor, char __user *arg) {
-	struct mhvtl_header		*vheadp;
+	struct mhvtl_lu_info	*lu = devp[minor];
+	struct mhvtl_header		 hdr;
 	struct mhvtl_queued_cmd *sqcp, *n;
+	unsigned long			 iflags;
 	int						 ret = 0;
 
-	list_for_each_entry_safe(sqcp, n, &devp[minor]->cmd_list, queued_sibling) {
+	/* Claim one queued command under the lock and copy its header out, so
+	 * the list is not walked while the timer or abort path is unlinking
+	 * entries, and copy_to_user() is not called with a spinlock held.
+	 */
+	spin_lock_irqsave(&lu->cmd_list_lock, iflags);
+	list_for_each_entry_safe(sqcp, n, &lu->cmd_list, queued_sibling) {
 		if (sqcp->state == CMD_STATE_QUEUED) {
-			vheadp = &sqcp->op_header;
-			if (copy_to_user((u8 *)arg, (u8 *)vheadp,
-							 sizeof(struct mhvtl_header))) {
-				ret = -EFAULT;
-				goto give_up;
-			}
+			hdr = sqcp->op_header;
 			/* Found an outstanding cmd to send */
 			sqcp->state = CMD_STATE_IN_USE;
 			ret			= VTL_QUEUE_CMD;
 			/* Can only send one header at a time */
-			goto give_up;
+			break;
 		}
 	}
+	spin_unlock_irqrestore(&lu->cmd_list_lock, iflags);
 
-give_up:
+	if (ret == VTL_QUEUE_CMD &&
+		copy_to_user((u8 *)arg, (u8 *)&hdr, sizeof(struct mhvtl_header)))
+		ret = -EFAULT;
+
 	return ret;
 }
 
@@ -1613,6 +1743,7 @@ static DECLARE_MUTEX(tmp_mutex);
 #endif
 
 static int mhvtl_remove_lu(unsigned int minor, char __user *arg) {
+	unsigned long hba_iflags;
 	struct mhvtl_ctl	   ctl;
 	struct mhvtl_hba_info *mhvtl_hba;
 	struct mhvtl_lu_info  *lu, *n;
@@ -1621,7 +1752,12 @@ static int mhvtl_remove_lu(unsigned int minor, char __user *arg) {
 
 	baksdev = NULL;
 
-	down(&tmp_mutex);
+	/* down() sleeps uninterruptibly, so a teardown that wedges inside
+	 * scsi_remove_device() below would leave every other daemon blocked
+	 * here in D state, unkillable even by SIGKILL.
+	 */
+	if (down_interruptible(&tmp_mutex))
+		return -ERESTARTSYS;
 
 	if (copy_from_user((u8 *)&ctl, (u8 *)arg, sizeof(ctl))) {
 		ret = -EFAULT;
@@ -1637,24 +1773,39 @@ static int mhvtl_remove_lu(unsigned int minor, char __user *arg) {
 	pr_debug("ioctl to remove device <c t l> <%02d %02d %02d>, hba: %p\n",
 			 ctl.channel, ctl.id, ctl.lun, mhvtl_hba);
 
-	spin_lock(&mhvtl_hba_list_lock);
+	spin_lock_irqsave(&mhvtl_hba_list_lock, hba_iflags);
 	list_for_each_entry_safe(lu, n, &mhvtl_hba->lu_list, lu_sibling) {
 		if ((lu->channel == ctl.channel) && (lu->target == ctl.id) &&
 			(lu->lun == ctl.lun)) {
 			pr_debug("line %d found matching lu\n", __LINE__);
-			list_del(&lu->lu_sibling);
+			/* Fail anything still outstanding while the unit is still
+			 * reachable, so scsi_remove_device() below has a queue that
+			 * can actually drain.
+			 */
+			mhvtl_fail_queued_cmnds(lu);
+			/* _init so the later list_del_init() in sdev_destroy(),
+			 * reached through scsi_remove_device() below, does not walk
+			 * poisoned pointers.
+			 */
+			list_del_init(&lu->lu_sibling);
 			devp[lu->minor] = NULL;
 
+			/* Ownership rule for the reference __scsi_add_device()
+			 * returned: whoever clears lu->sdev under sdev_lock owns the
+			 * matching scsi_device_put(). Clearing it here stops the
+			 * release path putting the same reference a second time.
+			 */
 			spin_lock(&lu->sdev_lock);
 			if (lu->sdev) {
-				baksdev = lu->sdev;
+				baksdev	 = lu->sdev;
+				lu->sdev = NULL;
 				spin_unlock(&lu->sdev_lock);
 				break;
 			}
 			spin_unlock(&lu->sdev_lock);
 		}
 	}
-	spin_unlock(&mhvtl_hba_list_lock);
+	spin_unlock_irqrestore(&mhvtl_hba_list_lock, hba_iflags);
 
 	if (baksdev) {
 		scsi_remove_device(baksdev);
@@ -1682,7 +1833,8 @@ static long mhvtl_c_ioctl(struct file *file, unsigned int cmd, unsigned long arg
 	}
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(2, 6, 39)
-	mutex_lock(&ioctl_mutex);
+	if (mutex_lock_interruptible(&ioctl_mutex))
+		return -ERESTARTSYS;
 #else
 	lock_kernel();
 #endif
@@ -1726,11 +1878,22 @@ static int mhvtl_c_ioctl_bkl(struct inode *inode, struct file *file,
 
 	case VTL_GET_DATA:
 		pr_debug("ioctl(VTL_GET_DATA)\n");
+		/* The slot is cleared by VTL_REMOVE_LU and by sdev destruction,
+		 * either of which can happen while a daemon is mid-command.
+		 */
+		if (!devp[minor]) {
+			ret = -ENODEV;
+			break;
+		}
 		ret = mhvtl_get_user_data(minor, (char __user *)arg);
 		break;
 
 	case VTL_PUT_DATA:
 		pr_debug("ioctl(VTL_PUT_DATA)\n");
+		if (!devp[minor]) {
+			ret = -ENODEV;
+			break;
+		}
 		ret = mhvtl_put_user_data(minor, (char __user *)arg);
 		break;
 
@@ -1747,9 +1910,43 @@ static int mhvtl_c_ioctl_bkl(struct inode *inode, struct file *file,
 }
 
 static int mhvtl_release(struct inode *inode, struct file *filp) {
-	unsigned int minor = iminor(inode);
+	unsigned int		  minor = iminor(inode);
+	struct mhvtl_lu_info *lu;
+	struct scsi_device	 *sdev = NULL;
+	unsigned long		  hba_iflags;
 
 	pr_debug("lu for minor %u Release\n", minor);
+
+	if (minor >= DEF_MAX_MINOR_NO)
+		return 0;
+
+	/* The daemon owns its logical unit for as long as it holds this file.
+	 * A daemon that exits without issuing VTL_REMOVE_LU - killed, crashed,
+	 * or left behind by a unit with KillMode=none - would otherwise strand
+	 * the scsi_device reference taken by __scsi_add_device(). That keeps
+	 * the host, and through it this module, referenced forever, so rmmod
+	 * fails and never gets to run the teardown that would release it.
+	 */
+	spin_lock_irqsave(&mhvtl_hba_list_lock, hba_iflags);
+	lu = devp[minor];
+	if (lu) {
+		spin_lock(&lu->sdev_lock);
+		sdev	 = lu->sdev;
+		lu->sdev = NULL;
+		spin_unlock(&lu->sdev_lock);
+	}
+	spin_unlock_irqrestore(&mhvtl_hba_list_lock, hba_iflags);
+
+	if (sdev) {
+		pr_debug("minor %u closed with its lu still registered"
+				 " - removing it\n",
+				 minor);
+		if (lu)
+			mhvtl_fail_queued_cmnds(lu);
+		scsi_remove_device(sdev);
+		scsi_device_put(sdev);
+	}
+
 	return 0;
 }
 
