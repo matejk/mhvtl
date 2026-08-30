@@ -273,7 +273,6 @@ const char *Check_Params(int argc, char **argv) {
 			if (!strcmp(argv[2], "exit")) {
 				if (argc == 3)
 					return;
-				PrintErrorExit(argv[0], "exit");
 			}
 			if (!strncasecmp(argv[2], "InquiryDataChange", 17)) {
 				return;
