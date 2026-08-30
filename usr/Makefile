@@ -217,17 +217,6 @@ bin/mhvtl_kernel_mod_build: cmd/mhvtl_kernel_mod_build.in
 	sed -e s'|@FIRMWAREDIR@|${FIRMWAREDIR}|' $< > $@
 	chmod 755 $@
 
-.PHONY:clean
-clean:
-	$(RM) *.d *.o *.so \
-		pm/*.d pm/*.o \
-		utils/*.d utils/*.o \
-		cmd/*.d cmd/*.o \
-		bin/*
-	$(RM) TAGS
-
-
-
 # ========== command targets ==========
 
 $(DESTDIR)$(PREFIX)/bin:
@@ -250,20 +239,21 @@ install: all \
 	ln $(DESTDIR)$(PREFIX)/bin/dump_tape $(DESTDIR)$(PREFIX)/bin/preload_tape
 	[ -d $(DESTDIR)$(SYSTEMD_GENERATOR_DIR) ] || install -d -m 755 $(DESTDIR)$(SYSTEMD_GENERATOR_DIR)
 	install -m 755 bin/mhvtl-device-conf-generator $(DESTDIR)$(SYSTEMD_GENERATOR_DIR)/
-	restorecon -R -v  $(DESTDIR)$(SYSTEMD_GENERATOR_DIR) 2>/dev/null || true
+	$(call RESTORECON_TREE,$(SYSTEMD_GENERATOR_DIR))
 ifeq ($(ROOTUID),YES)
-	ldconfig 
+	ldconfig
 endif
 
 .PHONY: uninstall
 uninstall:
 	rm -f $(addprefix $(DESTDIR)$(PREFIX)/,$(BINARIES) $(GENERATED_FILES)) \
+		  $(DESTDIR)$(PREFIX)/bin/preload_tape \
 		  $(addprefix $(DESTDIR)$(LIBDIR)/,$(LIBRARIES)) \
 		  $(DESTDIR)$(SYSTEMD_GENERATOR_DIR)/mhvtl-device-conf-generator
-	restorecon -R -v  $(DESTDIR)$(SYSTEMD_GENERATOR_DIR) 2>/dev/null || true
+	$(call RESTORECON_TREE,$(SYSTEMD_GENERATOR_DIR))
 ifeq ($(ROOTUID),YES)
 	ldconfig
-endif
+endif	
 
 .PHONY:tar
 tar:

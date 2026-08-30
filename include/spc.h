@@ -28,5 +28,7 @@ uint8_t spc_reserve(struct scsi_cmd *cmd);
 uint8_t spc_send_diagnostics(struct scsi_cmd *cmd);
 uint8_t spc_tur(struct scsi_cmd *cmd);
 uint8_t spc_read_buffer(struct scsi_cmd *cmd);
+uint8_t spc_report_supported_opcodes(struct scsi_cmd *cmd);
+uint8_t spc_maintenance_in(struct scsi_cmd *cmd);
 
 #endif /* SPC_H */

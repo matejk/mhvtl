@@ -159,6 +159,9 @@ struct priv_lu_ssc {
 	int		   *OK_2_write;
 	struct MAM *mamp;
 
+	/* Set once the volume change reference has been bumped for this load */
+	uint8_t vcr_updated;
+
 	uint64_t allow_overwrite_block; /* Used by 'allow overwrite' op code */
 	uint64_t max_capacity;			/* save MAM.max_capacity here for quick access */
 	uint64_t bytesRead_M;			/* Bytes read from media */
@@ -282,7 +285,7 @@ struct read_position_information_extended {
 void ssc_personality_module_register(struct ssc_personality_template *pm);
 
 int readBlock(uint8_t *buf, uint32_t request_sz, int sili, int lbp, uint8_t *sam_stat);
-int writeBlock(struct scsi_cmd *cmd, uint32_t request_sz);
+int writeBlock(struct scsi_cmd *cmd, uint32_t request_sz, uint32_t src_offset);
 
 uint8_t ssc_a3_service_action(struct scsi_cmd *cmd);
 uint8_t ssc_a4_service_action(struct scsi_cmd *cmd);
@@ -345,6 +348,7 @@ void init_ult3580_td6(struct lu_phy_attr *lu);
 void init_ult3580_td7(struct lu_phy_attr *lu);
 void init_ult3580_td8(struct lu_phy_attr *lu);
 void init_ult3580_td9(struct lu_phy_attr *lu);
+void init_ult3580_tda(struct lu_phy_attr *lu);
 void init_hp_ult_1(struct lu_phy_attr *lu);
 void init_hp_ult_2(struct lu_phy_attr *lu);
 void init_hp_ult_3(struct lu_phy_attr *lu);
@@ -363,6 +367,7 @@ void init_sdlt320_ssc(struct lu_phy_attr *lu);
 void init_sdlt600_ssc(struct lu_phy_attr *lu);
 
 void register_ops(struct lu_phy_attr *lu, int op, void *f, void *g, void *h);
+void unregister_ops(struct lu_phy_attr *lu, int op);
 
 uint8_t valid_encryption_blk(struct scsi_cmd *cmd);
 uint8_t check_restrictions(struct scsi_cmd *cmd);

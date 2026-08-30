@@ -26,6 +26,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <errno.h>
 #include <inttypes.h>
 #include "be_byteshift.h"
 #include "mhvtl_scsi.h"
@@ -159,12 +160,20 @@ static int is_drive_empty(struct d_info *drv) {
 			  my_id, msg_mount_state, drv->drv_id);
 	send_msg(msg_mount_state, drv->drv_id);
 
+	/* A failed receive leaves q untouched, so it must not be read */
+	memset(&q, 0, sizeof(q));
+
 	mlen = msgrcv(r_qid, &q, MAXOBN, my_id, MSG_NOERROR);
-	if (mlen > 0)
-		MHVTL_DBG(1, "%ld: Received \"%s\" from snd_id %ld",
-				  my_id,
-				  q.msg.text,
-				  q.msg.snd_id);
+	if (mlen <= 0) {
+		MHVTL_ERR("%ld: No reply from the drive: %s",
+				  my_id, strerror(errno));
+		return 1; /* Assume occupied rather than act on garbage */
+	}
+
+	MHVTL_DBG(1, "%ld: Received \"%s\" from snd_id %ld",
+			  my_id,
+			  q.msg.text,
+			  q.msg.snd_id);
 
 	/* string defined in q.h */
 	return strncmp(msg_not_occupied, q.msg.text, 12);
@@ -201,12 +210,20 @@ static int check_tape_unload(void) {
 		exit(1);
 	}
 
+	/* A failed receive leaves q untouched, so it must not be read */
+	memset(&q, 0, sizeof(q));
+
 	mlen = msgrcv(r_qid, &q, MAXOBN, my_id, MSG_NOERROR);
-	if (mlen > 0)
-		MHVTL_DBG(1, "%ld: Received \"%s\" from snd_id %ld",
-				  my_id,
-				  q.msg.text,
-				  q.msg.snd_id);
+	if (mlen <= 0) {
+		MHVTL_ERR("%ld: No reply from the drive: %s",
+				  my_id, strerror(errno));
+		return 1; /* Treat as an unload failure */
+	}
+
+	MHVTL_DBG(1, "%ld: Received \"%s\" from snd_id %ld",
+			  my_id,
+			  q.msg.text,
+			  q.msg.snd_id);
 
 	/* msg defined in q.h */
 	return strncmp(msg_unload_ok, q.msg.text, 11);
@@ -977,12 +994,20 @@ static int check_tape_load(void) {
 		exit(1);
 	}
 
+	/* A failed receive leaves q untouched, so it must not be read */
+	memset(&q, 0, sizeof(q));
+
 	mlen = msgrcv(r_qid, &q, MAXOBN, my_id, MSG_NOERROR);
-	if (mlen > 0)
-		MHVTL_DBG(1, "%ld: Received \"%s\" from snd_id %ld",
-				  my_id,
-				  q.msg.text,
-				  q.msg.snd_id);
+	if (mlen <= 0) {
+		MHVTL_ERR("%ld: No reply from the drive: %s",
+				  my_id, strerror(errno));
+		return 1; /* Treat as a load failure */
+	}
+
+	MHVTL_DBG(1, "%ld: Received \"%s\" from snd_id %ld",
+			  my_id,
+			  q.msg.text,
+			  q.msg.snd_id);
 
 	/* msg defined in q.h */
 	return strncmp(msg_load_ok, q.msg.text, strlen(msg_load_ok));

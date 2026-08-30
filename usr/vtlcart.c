@@ -640,17 +640,50 @@ int read_mam(int mam_fd, int mhvtl_fd, struct MAM *mamp) {
 				}
 			}
 
-			/* attribute not known: skip value */
+			/* Not in the static table. A host vendor specific attribute is
+			 * carried as a format byte followed by the value; anything else
+			 * is from a build that knows attributes this one does not.
+			 */
 			if (idx < 0) {
+				if (mam_vendor_attr_range(attr.attribute_id) && attr.length) {
+					uint8_t format;
+					uint8_t value[MAM_VENDOR_ATTR_VALUE_LEN];
+					uint16_t len = attr.length - 1;
+
+					if (len > MAM_VENDOR_ATTR_VALUE_LEN)
+						len = MAM_VENDOR_ATTR_VALUE_LEN;
+
+					if (read(mam_fd, &format, sizeof(format)) != sizeof(format))
+						return -1;
+					if (read(mam_fd, value, len) != len)
+						return -1;
+					if (attr.length - 1 > len)
+						lseek(mam_fd, attr.length - 1 - len, SEEK_CUR);
+
+					mam_vendor_attr_set(mamp, attr.attribute_id, format, value, len);
+					continue;
+				}
 				if (attr.length) lseek(mam_fd, attr.length, SEEK_CUR);
 				continue;
 			}
 
-			if (read(mam_fd, mamp->attributes[idx].value, attr.length) != attr.length) {
+			/* The length stored on the medium need not match the length
+			 * this build expects - an attribute may have grown or shrunk
+			 * between mhvtl versions. Take only what fits the field and
+			 * step over whatever is left of the stored value.
+			 */
+			uint16_t len = attr.length;
+			if (len > mamp->attributes[idx].length)
+				len = mamp->attributes[idx].length;
+
+			if (read(mam_fd, mamp->attributes[idx].value, len) != len) {
 				MHVTL_ERR("Error reading mam attribute %04x value : %s",
 						  attr.attribute_id, strerror(errno));
 				return -1;
 			}
+
+			if (attr.length > len)
+				lseek(mam_fd, attr.length - len, SEEK_CUR);
 		}
 	}
 
@@ -685,11 +718,18 @@ int read_mam(int mam_fd, int mhvtl_fd, struct MAM *mamp) {
 				continue;
 			}
 
-			if (read(mhvtl_fd, mamp->mhvtl_attr[idx].value, attr.length) != attr.length) {
+			uint16_t len = attr.length;
+			if (len > mamp->mhvtl_attr[idx].length)
+				len = mamp->mhvtl_attr[idx].length;
+
+			if (read(mhvtl_fd, mamp->mhvtl_attr[idx].value, len) != len) {
 				MHVTL_ERR("Error reading mhvtl attribute %04x value : %s",
 						  attr.attribute_id, strerror(errno));
 				return -1;
 			}
+
+			if (attr.length > len)
+				lseek(mhvtl_fd, attr.length - len, SEEK_CUR);
 		}
 	}
 
@@ -701,6 +741,14 @@ int read_mam(int mam_fd, int mhvtl_fd, struct MAM *mamp) {
  * Using a Type-Length-Value format to keep mam auto-descriptive
  * Returns 0 if nothing written or -1 on error
  */
+static int truncate_at_offset(int fd) {
+	off_t end = lseek(fd, 0, SEEK_CUR);
+
+	if (end < 0)
+		return -1;
+	return ftruncate(fd, end);
+}
+
 int write_mam(int mam_fd, int mhvtl_fd) {
 
 	if ((lseek(mam_fd, 0, SEEK_SET) != 0) || (lseek(mhvtl_fd, 0, SEEK_SET) != 0)) {
@@ -729,6 +777,27 @@ int write_mam(int mam_fd, int mhvtl_fd) {
 			return -1;
 	}
 
+	/* Host vendor specific attributes. The record carries the attribute format
+	 * ahead of the value, because unlike the static attributes there is no
+	 * table to recover it from when the medium is read back.
+	 */
+	for (int i = 0; i < mam.vendor_attr_count; i++) {
+		const struct MAM_vendor_attr *attr = &mam.vendor_attr[i];
+		const uint16_t				  len  = attr->length + 1;
+
+		if (write(mam_fd, &attr->attribute_id, sizeof(uint16_t)) != sizeof(uint16_t))
+			return -1;
+
+		if (write(mam_fd, &len, sizeof(uint16_t)) != sizeof(uint16_t))
+			return -1;
+
+		if (write(mam_fd, &attr->format, sizeof(uint8_t)) != sizeof(uint8_t))
+			return -1;
+
+		if (write(mam_fd, attr->value, attr->length) != attr->length)
+			return -1;
+	}
+
 	/* mhvtl attributes */
 	for (int i = 0; i < MAM_MHVTL_ATTRIBUTE_END; i++) {
 		const struct MHVTL_attr *attr = &mam.mhvtl_attr[i];
@@ -745,6 +814,13 @@ int write_mam(int mam_fd, int mhvtl_fd) {
 		if (write(mhvtl_fd, attr->value, attr->length) != attr->length)
 			return -1;
 	}
+
+	/* The vendor attribute section is variable length, so this rewrite may be
+	 * shorter than what the files already hold. Cut any stale tail: the loader
+	 * parses records up to end of file.
+	 */
+	if (truncate_at_offset(mam_fd) || truncate_at_offset(mhvtl_fd))
+		return -1;
 
 	return 0;
 }
@@ -793,10 +869,17 @@ static int open_partition(uint8_t partition_number) {
 	char		 pcl_data[1024], pcl_indx[1024], pcl_meta[1024];
 	const char	*pcl_files[3] = {pcl_data, pcl_indx, pcl_meta};
 	struct stat	 data_stat, indx_stat, meta_stat;
-	struct stat *stats[3]	= {&data_stat, &indx_stat, &meta_stat};
-	int			*fd_open[3] = {&datafile[partition_number],
-							   &indxfile[partition_number],
-							   &metafile[partition_number]};
+	struct stat *stats[3] = {&data_stat, &indx_stat, &meta_stat};
+	int			*fd_open[3];
+
+	if (partition_number >= MAX_PARTITIONS) {
+		MHVTL_ERR("Partition %d out of range", partition_number);
+		return 3;
+	}
+
+	fd_open[0] = &datafile[partition_number];
+	fd_open[1] = &indxfile[partition_number];
+	fd_open[2] = &metafile[partition_number];
 
 	snprintf(pcl_data, ARRAY_SIZE(pcl_data), "%s/data.%d", currentPCL, partition_number);
 	snprintf(pcl_indx, ARRAY_SIZE(pcl_indx), "%s/indx.%d", currentPCL, partition_number);
@@ -818,9 +901,14 @@ static int open_partition(uint8_t partition_number) {
 }
 
 static void close_partition(uint8_t partition_number) {
-	int *fd_close[3] = {&datafile[partition_number],
-						&indxfile[partition_number],
-						&metafile[partition_number]};
+	int *fd_close[3];
+
+	if (partition_number >= MAX_PARTITIONS)
+		return;
+
+	fd_close[0] = &datafile[partition_number];
+	fd_close[1] = &indxfile[partition_number];
+	fd_close[2] = &metafile[partition_number];
 	for (int i = 0; i < 3; i++) {
 		if (*fd_close[i] >= 0) {
 			close(*fd_close[i]);
@@ -830,13 +918,25 @@ static void close_partition(uint8_t partition_number) {
 }
 
 int change_partition(uint8_t partition_number) {
-	uint8_t *sam_stat = SAM_STAT_GOOD;
-	int		 rc		  = 0;
+	/* Somewhere for read_header() to report a failure. This used to be a
+	 * pointer initialised to SAM_STAT_GOOD, which is zero - so the moment
+	 * read_header() failed, on a medium whose header could not be read, it
+	 * wrote through a null pointer.
+	 */
+	uint8_t sam_stat = SAM_STAT_GOOD;
+	int		rc		 = 0;
+
+	if (partition_number >= MAX_PARTITIONS) {
+		MHVTL_ERR("Partition %d out of range", partition_number);
+		return 1;
+	}
 
 	close_partition(c_pos->partition_id);
 	c_pos->partition_id = partition_number;
 	rc					= open_partition(partition_number);
-	read_header(0, sam_stat);
+	if (read_header(0, &sam_stat))
+		MHVTL_ERR("Could not read the first header of partition %d",
+				  partition_number);
 	return rc;
 }
 
@@ -1242,10 +1342,17 @@ int load_tape(const char *pcl, uint8_t *sam_stat) {
 		}
 	}
 
-	/* load all partitions */
+	/* Load all partitions. The per-partition state is MAX_PARTITIONS deep,
+	 * so stop there however many data.N files the cartridge directory holds.
+	 */
 	mam.num_partitions = 0;
 	snprintf(path, ARRAY_SIZE(path), "%s/data.%d", currentPCL, mam.num_partitions);
 	while (access(path, F_OK) == 0) {
+		if (mam.num_partitions >= MAX_PARTITIONS) {
+			MHVTL_ERR("pcl %s has more than %d partitions - ignoring the rest",
+					  pcl, MAX_PARTITIONS);
+			break;
+		}
 		c_pos->partition_id = mam.num_partitions;
 		load_partition(pcl, sam_stat, error_check, mam.num_partitions);
 		snprintf(path, ARRAY_SIZE(path), "%s/data.%d", currentPCL, ++mam.num_partitions);
@@ -1300,6 +1407,11 @@ int format_tape(uint8_t *sam_stat) {
 	}
 
 	/* Create <mam.num_partitions> partitions */
+	if (mam.num_partitions > MAX_PARTITIONS) {
+		MHVTL_ERR("num_partitions %d exceeds %d - clamping",
+				  mam.num_partitions, MAX_PARTITIONS);
+		mam.num_partitions = MAX_PARTITIONS;
+	}
 	for (int j = 0; j < mam.num_partitions; ++j) {
 		create_partition(j);
 	}
@@ -1600,6 +1712,20 @@ uint64_t current_tape_offset(void) {
 		return raw_pos.data_offset;
 
 	return 0;
+}
+
+/*
+ * Bytes written in 'partition' - the data offset of its end of data.
+ *
+ * Unlike current_tape_offset() this works for any partition, not just the one
+ * the drive is positioned in, so capacity reporting can describe the whole
+ * medium.
+ */
+uint64_t partition_data_offset(int partition) {
+	if ((partition < 0) || (partition >= MAX_PARTITIONS))
+		return 0;
+
+	return eod_data_offset[partition];
 }
 
 uint64_t current_tape_block(void) {

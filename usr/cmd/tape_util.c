@@ -165,7 +165,15 @@ uint8_t valid_encryption_blk(struct scsi_cmd *cmd) {
 	return TRUE;
 }
 
+/* Overrides the libvtlscsi definition: the personality modules linked here
+ * call it during setup, but this tool never dispatches SCSI commands.
+ */
 void register_ops(struct lu_phy_attr *lu, int op, void *f, void *g, void *h) {
+	if (debug)
+		printf("Entering %s() +++\n", __func__);
+}
+
+void unregister_ops(struct lu_phy_attr *lu, int op) {
 	if (debug)
 		printf("Entering %s() +++\n", __func__);
 }
@@ -326,7 +334,7 @@ static int write_tape(char *source_file, uint32_t block_size, char *compression,
 				printf("zeroing out remaining block: %" PRIu32 "\n", (uint32_t)(block_size - count));
 				memset(b + count, 0, block_size - count); /* Zero out remaining block */
 			}
-			retval = writeBlock(&cmd, count);
+			retval = writeBlock(&cmd, count, 0);
 			if (retval < count) {
 				if (sense[2] == (VOLUME_OVERFLOW | SD_EOM) && sense[13] == E_EOM) {
 					printf("No space left on media, hit EOM while writing\n");

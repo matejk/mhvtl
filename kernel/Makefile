@@ -38,15 +38,22 @@ mhvtl.ko:	config.h
 config.h: config.sh
 	./config.sh
 
+MODULE_DIR = $(DESTDIR)/lib/modules/$(V)/kernel/drivers/scsi
+
+# depmod describes the running system, so it is only meaningful for an install
+# that lands on it, not for one staged into DESTDIR for packaging.
+RUN_DEPMOD = if [ -z "$(DESTDIR)" ] && command -v depmod >/dev/null 2>&1; then depmod -a; fi
+
 install: all
 	[ -d $(DESTDIR)$(FIRMWAREDIR)/mhvtl ] || mkdir -p $(DESTDIR)$(FIRMWAREDIR)/mhvtl
 	install -m 755 ../mhvtl_kernel.tgz $(DESTDIR)$(FIRMWAREDIR)/mhvtl/
-	install -o root -g root -m 644 mhvtl.ko /lib/modules/$(V)/kernel/drivers/scsi/
-	depmod -a
+	[ -d $(MODULE_DIR) ] || install -d -m 755 $(MODULE_DIR)
+	install -m 644 mhvtl.ko $(MODULE_DIR)/
+	$(RUN_DEPMOD)
 
 uninstall: distclean
-	rm -f /lib/modules/$(V)/kernel/drivers/scsi/mhvtl.ko $(DESTDIR)$(FIRMWAREDIR)/mhvtl/mhvtl_kernel.tgz
-	depmod -a
+	rm -f $(MODULE_DIR)/mhvtl.ko $(DESTDIR)$(FIRMWAREDIR)/mhvtl/mhvtl_kernel.tgz
+	$(RUN_DEPMOD)
 
 ../mhvtl_kernel.tgz:  $(wildcard ./*.c) $(wildcard ./*.h) $(wildcard ../include/common/*.h) \
 					  config.sh Makefile

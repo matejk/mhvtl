@@ -453,8 +453,8 @@ void init_dlt8000_ssc(struct lu_phy_attr *lu) {
 	((struct priv_lu_ssc *)lu->lu_private)->capacity_unit = 1L << 20;
 
 	/* Don't support PERSISTENT RESERVATION */
-	register_ops(lu, PERSISTENT_RESERVE_IN, spc_illegal_op, NULL, NULL);
-	register_ops(lu, PERSISTENT_RESERVE_OUT, spc_illegal_op, NULL, NULL);
+	unregister_ops(lu, PERSISTENT_RESERVE_IN);
+	unregister_ops(lu, PERSISTENT_RESERVE_OUT);
 
 	add_density_support(&lu->den_list, &density_dlt2, 0);
 	add_density_support(&lu->den_list, &density_dlt3, 1);

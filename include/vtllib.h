@@ -151,6 +151,40 @@ struct mode {
  */
 #define MAM_VERSION 4
 
+/* Length of the VOLUME COHERENCY INFORMATION attribute (0x080c).
+ * SSC defines this as 0x46 bytes: a one byte VCR length, the 8 byte volume
+ * change reference, an 8 byte coherency count, an 8 byte coherency set
+ * identifier, a two byte application client specific information length
+ * followed by 43 bytes of that information (LTFS stores "LTFS", the volume
+ * uuid and a format version byte there).
+ */
+#define MAM_COHERENCY_LEN 0x46
+
+/* Host vendor specific attributes (0x1400 - 0x17ff).
+ *
+ * Everything else in the MAM is described by the static attribute table, which
+ * binds each attribute id to a field of struct MAM. This range belongs to the
+ * application: it may store any attribute it likes there, so the attributes
+ * have to be kept as data rather than as fields. Archive applications use it to
+ * label a cartridge - a barcode, a volume uuid, an initialisation timestamp -
+ * and expect to read the label back after a reload.
+ *
+ * They are held in a fixed size array so that struct MAM remains a plain value
+ * type: resp_write_attribute() takes a copy of the whole struct to roll back a
+ * write that turns out to be invalid, which a pointer-based store would break.
+ */
+#define MAM_VENDOR_ATTR_FIRST	  0x1400
+#define MAM_VENDOR_ATTR_LAST	  0x17ff
+#define MAM_VENDOR_ATTR_MAX		  32
+#define MAM_VENDOR_ATTR_VALUE_LEN 256
+
+struct MAM_vendor_attr {
+	uint16_t attribute_id;
+	uint16_t length; /* 0 => unused slot */
+	uint8_t	 format;
+	uint8_t	 value[MAM_VENDOR_ATTR_VALUE_LEN];
+};
+
 enum MAM_attribute_idx {
 	/* 0x0000 – 0x03ff : Device */
 	MAM_REMAINING_CAPACITY,
@@ -213,6 +247,20 @@ enum MHVTL_attribute_idx {
 	MAM_MHVTL_MAX_PARTITIONS,
 	MAM_MHVTL_NUM_PARTITIONS,
 	MAM_MHVTL_MEDIA_TYPE,
+
+	/* Volume coherency information for partitions 1 and up. Partition 0 is
+	 * carried by the standard 0x080c attribute, but the coherency record is
+	 * per-partition and only one of them fits in the SSC attribute space.
+	 */
+	MAM_MHVTL_VOLUME_COHERENCY_P1,
+	MAM_MHVTL_VOLUME_COHERENCY_P2,
+	MAM_MHVTL_VOLUME_COHERENCY_P3,
+
+	/* Size of each partition, written at format time */
+	MAM_MHVTL_PARTITION_CAPACITY_P0,
+	MAM_MHVTL_PARTITION_CAPACITY_P1,
+	MAM_MHVTL_PARTITION_CAPACITY_P2,
+	MAM_MHVTL_PARTITION_CAPACITY_P3,
 
 	/* media_info */
 	MAM_MHVTL_MEDIAINFO_BITS_PER_MM,
@@ -286,12 +334,19 @@ struct MAM {
 	uint8_t OwningHostTextualName[80];
 	uint8_t MediaPool[160];
 	uint8_t ApplicationFormatVersion[16];
-	uint8_t VolumeCoherencyInformation[46];
+	uint8_t VolumeCoherencyInformation[MAX_PARTITIONS][MAM_COHERENCY_LEN];
 
 	/* 0x0c00 - 0x0fff - Device - Vendor Specific */
 	/* 0x1000 - 0x13ff - Medium - Vendor Specific */
 	/* 0x1400 - 0x17ff -  Host  - Vendor Specific */
 	uint8_t VolumeLock;
+
+	/* Attributes in the host vendor specific range that the static table does
+	 * not describe. Kept sorted by attribute id, as READ ATTRIBUTE has to
+	 * report attributes in ascending order.
+	 */
+	uint16_t			   vendor_attr_count;
+	struct MAM_vendor_attr vendor_attr[MAM_VENDOR_ATTR_MAX];
 
 	/* mhvtl attributes */
 	uint8_t	 record_dirty; /* 0 = Record clean, non-zero umount failed. */
@@ -299,6 +354,14 @@ struct MAM {
 	uint8_t	 MediaType; /* LTO1, LTO2, AIT etc (Media_Type_list) */
 	uint8_t	 max_partitions;
 	uint8_t	 num_partitions;
+
+	/* Capacity of each partition in bytes, as laid down when the medium was
+	 * formatted. Partitioning belongs to the medium - a real drive reads the
+	 * geometry back off the tape when a cartridge is loaded - so it has to
+	 * outlive the drive it was formatted in. Zero for media formatted before
+	 * this was recorded, or never partitioned.
+	 */
+	uint64_t partition_capacity[MAX_PARTITIONS];
 
 	struct uniq_media_info {
 		uint32_t bits_per_mm;
@@ -459,6 +522,14 @@ enum Media_Type_list {
 	Media_9940A_CLEAN,
 	Media_9940B,
 	Media_9940B_CLEAN,
+	/* New media types are appended here rather than grouped with their own
+	 * generation: the value is stored as MediaType in the MAM of every
+	 * cartridge, so inserting one would re-type existing media on disk.
+	 */
+	Media_LTO10,
+	Media_LTO10_CLEAN,
+	Media_LTO10_WORM,
+	Media_LTO10P,
 	Media_UNKNOWN /* always last */
 };
 
@@ -471,9 +542,24 @@ struct scsi_cmd {
 	struct lu_phy_attr *lu;
 };
 
-#define SCSI_OP(opcode, fn) \
-	[opcode] = {            \
-		.cmd_perform = fn,  \
+/* Recommended command timeouts, in seconds, reported by REPORT SUPPORTED
+ * OPERATION CODES. A non-zero timeout also marks the op code as supported,
+ * which is what SCSI_OP_RANGE(0x00, 0xff, spc_illegal_op) leaves at zero.
+ */
+#define MHVTL_DEF_CMD_TIMEOUT  900
+#define MHVTL_LONG_CMD_TIMEOUT 3600
+
+#define SCSI_OP(opcode, fn)                    \
+	[opcode] = {                               \
+		.cmd_perform = fn,                     \
+		.timeout	 = MHVTL_DEF_CMD_TIMEOUT,  \
+	}
+
+/* As SCSI_OP(), for commands that can keep the drive busy for a long time */
+#define SCSI_OP_TO(opcode, fn, to) \
+	[opcode] = {                   \
+		.cmd_perform = fn,         \
+		.timeout	 = to,         \
 	}
 
 #define SCSI_OP_RANGE(lo_op, hi_op, fn) \
@@ -485,6 +571,7 @@ struct device_type_operations {
 	uint8_t (*cmd_perform)(struct scsi_cmd *cmd);
 	int (*pre_cmd_perform)(struct scsi_cmd *cmd, void *p);
 	int (*post_cmd_perform)(struct scsi_cmd *cmd, void *p);
+	uint32_t timeout; /* Seconds; 0 => op code not supported */
 };
 
 struct device_type_template {
@@ -660,6 +747,11 @@ enum MHVTL_STATE {
 
 int	 get_config(char *buf, conf_file conf, long my_id);
 void init_mam(struct MAM* mamp);
+int mam_vendor_attr_range(uint16_t attribute_id);
+struct MAM_vendor_attr *mam_vendor_attr_find(struct MAM *mamp, uint16_t attribute_id);
+void mam_vendor_attr_remove(struct MAM *mamp, uint16_t attribute_id);
+int mam_vendor_attr_set(struct MAM *mamp, uint16_t attribute_id, uint8_t format,
+						const uint8_t *value, uint16_t length);
 
 int	 check_reset(uint8_t *);
 int	 check_inquiry_data_has_changed(uint8_t *);
@@ -681,6 +773,10 @@ int			 resp_read_position(loff_t, uint8_t *, uint8_t *);
 uint32_t	 resp_read_media_serial(uint8_t *, uint8_t *, uint8_t *);
 int			 resp_mode_sense(uint8_t *, uint8_t *, struct mode *, uint8_t, uint8_t *);
 struct mode *lookup_mode_pg(struct list_head *l, uint8_t pcode, uint8_t subpcode);
+uint64_t	 medium_partition_capacity(struct lu_phy_attr *lu, int partition);
+uint64_t	 medium_partition_capacity_from_mode_page(struct lu_phy_attr *lu, int partition);
+void		 set_medium_partition_capacity(struct lu_phy_attr *lu);
+void		 update_medium_partition_page(struct lu_phy_attr *lu);
 int			 resp_read_block_limits(struct mhvtl_ds *dbuf_p, int sz);
 
 void  hex_dump(uint8_t *, int);
@@ -690,6 +786,8 @@ int	  open_fifo(FILE **fifo_fd, char *fifoname);
 void  status_change(FILE *fifo_fd, int current_status, int my_id, char **msg);
 
 char *readline(char *s, int len, FILE *f);
+char *conf_value(char *line, const char *field);
+void conf_clamp_string(char *s, unsigned int len, int lineno);
 void  blank_fill(uint8_t *dest, char *src, int len);
 
 void log_opcode(char *opcode, struct scsi_cmd *cmd);
@@ -738,6 +836,10 @@ int add_drive_media_list(struct lu_phy_attr *lu, int status, char *s);
 
 void		 find_media_home_directory(char *config_directory, long lib_id);
 unsigned int set_media_params(struct MAM *mamp, char *density);
+uint8_t		 media_max_partitions(uint8_t media_type);
+uint64_t	 media_native_capacity(uint8_t media_type);
+uint64_t	 media_mam_capacity(uint8_t media_type);
+void		 mam_space_remaining(struct MAM *mamp);
 
 char *slot_type_str(int type);
 void  init_smc_log_pages(struct lu_phy_attr *lu);

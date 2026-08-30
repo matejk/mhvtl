@@ -128,6 +128,7 @@ struct device_type_template smc_template = {
 		/* 0x90 -> 0x9f */
 		/* 0xa0 -> 0xaf */
 		SCSI_OP(0xa0, spc_illegal_op), /* processed in the kernel module */
+		SCSI_OP(0xa3, spc_maintenance_in),
 		SCSI_OP(0xa5, smc_move_medium),
 
 		/* 0xb0 -> 0xbf */
@@ -143,16 +144,6 @@ struct device_type_template smc_template = {
 
 __attribute__((constructor)) static void smc_init(void) {
 	device_type_register(&lunit, &smc_template);
-}
-
-/*
- * Update ops[xx] with new/updated/custom function 'f'
- */
-void register_ops(struct lu_phy_attr *lu, int op,
-				  void *f, void *g, void *h) {
-	lu->scsi_ops->ops[op].cmd_perform	   = f;
-	lu->scsi_ops->ops[op].pre_cmd_perform  = g;
-	lu->scsi_ops->ops[op].post_cmd_perform = h;
 }
 
 /*
@@ -592,7 +583,6 @@ static void update_drive_details(struct lu_phy_attr *lu) {
 	char			 device_conf[CONF_FILE_SZ];
 	FILE			*conf;
 	char			*b; /* Read from file into this buffer */
-	char			*s; /* Somewhere for sscanf to store results */
 	int				 slot;
 	long			 drv_id, lib_id;
 	struct d_info	*dp;
@@ -607,11 +597,6 @@ static void update_drive_details(struct lu_phy_attr *lu) {
 		MHVTL_DBG(1, "Can not open config file %s : %s", device_conf,
 				  strerror(errno));
 		perror("Can not open config file");
-		exit(1);
-	}
-	s = zalloc(MALLOC_SZ);
-	if (!s) {
-		perror("Could not allocate memory");
 		exit(1);
 	}
 	b = zalloc(MALLOC_SZ);
@@ -655,25 +640,28 @@ static void update_drive_details(struct lu_phy_attr *lu) {
 			continue;
 		}
 		if (dp) {
-			if (sscanf(b, " Unit serial number: %s", s) > 0) {
-				strncpy(dp->inq_product_sno, s, 10);
+			char *v;
+
+			v = conf_value(b, "Unit serial number");
+			if (v) {
+				strncpy(dp->inq_product_sno, v, 10);
 				rmnl(dp->inq_product_sno, ' ', 10);
 			}
-			if (sscanf(b, " Product identification: %16c", s) > 0) {
-				/* sscanf does not NULL terminate */
-				/* 25 is len of ' Product identification: ' */
-				s[strlen(b) - 25] = '\0';
-				strncpy(dp->inq_product_id, s, 16);
+			v = conf_value(b, "Product identification");
+			if (v) {
+				strncpy(dp->inq_product_id, v, 16);
 				dp->inq_product_id[16] = 0;
 				MHVTL_DBG(3, "id: \'%s\', inq_product_id: \'%s\'",
-						  s, dp->inq_product_id);
+						  v, dp->inq_product_id);
 			}
-			if (sscanf(b, " Product revision level: %s", s) > 0) {
-				strncpy(dp->inq_product_rev, s, 4);
+			v = conf_value(b, "Product revision level");
+			if (v) {
+				strncpy(dp->inq_product_rev, v, 4);
 				rmnl(dp->inq_product_rev, ' ', 4);
 			}
-			if (sscanf(b, " Vendor identification: %s", s) > 0) {
-				strncpy(dp->inq_vendor_id, s, 8);
+			v = conf_value(b, "Vendor identification");
+			if (v) {
+				strncpy(dp->inq_vendor_id, v, 8);
 				rmnl(dp->inq_vendor_id, ' ', 8);
 			}
 		}
@@ -684,7 +672,6 @@ static void update_drive_details(struct lu_phy_attr *lu) {
 	}
 
 	free(b);
-	free(s);
 	fclose(conf);
 }
 
@@ -1154,7 +1141,6 @@ static int init_lu(struct lu_phy_attr *lu, unsigned minor, struct mhvtl_ctl *ctl
 	char			 device_conf[CONF_FILE_SZ];
 	FILE			*conf;
 	char			*b; /* Read from file into this buffer */
-	char			*s; /* Somewhere for sscanf to store results */
 	int				 indx;
 	struct mhvtl_ctl tmpctl;
 	int				 found = 0;
@@ -1194,11 +1180,6 @@ static int init_lu(struct lu_phy_attr *lu, unsigned minor, struct mhvtl_ctl *ctl
 		perror("Can not open config file");
 		exit(1);
 	}
-	s = zalloc(MALLOC_SZ);
-	if (!s) {
-		perror("Could not allocate memory");
-		exit(1);
-	}
 	b = zalloc(MALLOC_SZ);
 	if (!b) {
 		perror("Could not allocate memory");
@@ -1233,39 +1214,47 @@ static int init_lu(struct lu_phy_attr *lu, unsigned minor, struct mhvtl_ctl *ctl
 		if (indx == minor) {
 			unsigned int c, d, e, f, g, h, j, k;
 			int			 i;
+			char		*v;
 
-			if (sscanf(b, " Unit serial number: %s", s)) {
-				checkstrlen(s, SCSI_SN_LEN, linecount);
-				snprintf(lu->lu_serial_no, SCSI_SN_LEN, "%-14s", s);
+			v = conf_value(b, "Unit serial number");
+			if (v) {
+				conf_clamp_string(v, SCSI_SN_LEN, linecount);
+				snprintf(lu->lu_serial_no, SCSI_SN_LEN, "%-14s", v);
 			}
-			if (sscanf(b, " Product identification: %16c", s) > 0) {
-				/* sscanf does not NULL terminate */
-				i	 = strlen(b) - 25; /* len of ' Product identification: ' */
-				s[i] = '\0';
-				snprintf(lu->product_id, PRODUCT_ID_LEN + 1, "%-16s", s);
-				snprintf(&lu->inquiry[16], PRODUCT_ID_LEN + 1, "%-16s", s);
+			v = conf_value(b, "Product identification");
+			if (v) {
+				conf_clamp_string(v, PRODUCT_ID_LEN, linecount);
+				snprintf(lu->product_id, PRODUCT_ID_LEN + 1, "%-16s", v);
+				snprintf(&lu->inquiry[16], PRODUCT_ID_LEN + 1, "%-16s", v);
 			}
-			if (sscanf(b, " Product revision level: %s", s)) {
-				checkstrlen(s, PRODUCT_REV_LEN, linecount);
-				snprintf(&lu->inquiry[32], PRODUCT_REV_LEN + 1, "%-4s", s);
+			v = conf_value(b, "Product revision level");
+			if (v) {
+				conf_clamp_string(v, PRODUCT_REV_LEN, linecount);
+				snprintf(&lu->inquiry[32], PRODUCT_REV_LEN + 1, "%-4s", v);
 			}
-			if (sscanf(b, " Vendor identification: %s", s)) {
-				checkstrlen(s, VENDOR_ID_LEN, linecount);
-				snprintf(lu->vendor_id, VENDOR_ID_LEN + 1, "%-8s", s);
-				snprintf(&lu->inquiry[8], VENDOR_ID_LEN + 1, "%-8s", s);
+			v = conf_value(b, "Vendor identification");
+			if (v) {
+				conf_clamp_string(v, VENDOR_ID_LEN, linecount);
+				snprintf(lu->vendor_id, VENDOR_ID_LEN + 1, "%-8s", v);
+				snprintf(&lu->inquiry[8], VENDOR_ID_LEN + 1, "%-8s", v);
 			}
-			if (sscanf(b, " fifo: %s", s))
-				process_fifoname(lu, s, 0);
-			if (sscanf(b, " PERSIST: %s", s)) {
-				if (!strncasecmp(s, "yes", 3) ||
-					(!strncasecmp(s, "true", 4)))
+			v = conf_value(b, "fifo");
+			if (v)
+				process_fifoname(lu, v, 0);
+			v = conf_value(b, "PERSIST");
+			if (v) {
+				if (!strncasecmp(v, "yes", 3) ||
+					(!strncasecmp(v, "true", 4)))
 					lu->persist = TRUE;
 			}
-			if (sscanf(b, " movecommand: %s", s))
-				smc_slots.movecommand = strndup(s, MALLOC_SZ);
-			if (sscanf(b, " commandtimeout: %d", &d))
+			v = conf_value(b, "movecommand");
+			if (v)
+				smc_slots.movecommand = strndup(v, MALLOC_SZ);
+			v = conf_value(b, "commandtimeout");
+			if (v && sscanf(v, "%d", &d))
 				smc_slots.commandtimeout = d;
-			if (sscanf(b, " Backoff: %d", &i)) {
+			v = conf_value(b, "Backoff");
+			if (v && sscanf(v, "%d", &i)) {
 				if ((i > 1) && (i < 10000)) {
 					MHVTL_DBG(1, "Backoff value: %d", i);
 					backoff = i;
@@ -1296,7 +1285,6 @@ static int init_lu(struct lu_phy_attr *lu, unsigned minor, struct mhvtl_ctl *ctl
 	}
 	fclose(conf);
 	free(b);
-	free(s);
 
 	if (found && !lu->inquiry[32]) {
 		char *v;
@@ -1467,14 +1455,23 @@ static void customise_lu(struct lu_phy_attr *lu) {
 		init_default_smc(lu);
 }
 
+static volatile sig_atomic_t reread_config_requested;
+
+/* SIGHUP handler: only raise a flag. The re-initialisation itself runs
+ * from the main loop, where no command is part way through.
+ */
 void rereadconfig(int sig) {
+	(void)sig;
+	reread_config_requested = 1;
+}
+
+static void do_rereadconfig(void) {
 	struct mhvtl_ctl ctl;
 	int				 buffer_size;
 
 	lunit.online = 0; /* Report library offline until finished */
 
-	MHVTL_DBG(1, "Caught signal (%d): Re-initialising library %d",
-			  sig, (int)my_id);
+	MHVTL_DBG(1, "Re-initialising library %d", (int)my_id);
 
 	cleanup_lu(&lunit);
 
@@ -1830,6 +1827,11 @@ int main(int argc, char *argv[]) {
 				break;
 
 			case VTL_IDLE:
+				if (reread_config_requested) {
+					reread_config_requested = 0;
+					do_rereadconfig();
+					buffer_size = smc_slots.bufsize;
+				}
 				usleep(pollInterval);
 
 				if (pollInterval < 1000000)

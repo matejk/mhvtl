@@ -764,3 +764,261 @@ uint8_t spc_read_buffer(struct scsi_cmd *cmd) {
 
 	return SAM_STAT_GOOD;
 }
+
+/*
+ * Update ops[xx] with new/updated/custom function 'f'.
+ *
+ * Personality modules add and remove commands at start up, so the marker
+ * REPORT SUPPORTED OPERATION CODES reports is kept in step here.
+ */
+void register_ops(struct lu_phy_attr *lu, int op,
+				  void *f, void *g, void *h) {
+	lu->scsi_ops->ops[op].cmd_perform	   = f;
+	lu->scsi_ops->ops[op].pre_cmd_perform  = g;
+	lu->scsi_ops->ops[op].post_cmd_perform = h;
+	lu->scsi_ops->ops[op].timeout		   = MHVTL_DEF_CMD_TIMEOUT;
+}
+
+/* Remove a command a personality does not implement. Kept separate from
+ * register_ops() so supportedness never rests on comparing function pointers
+ * across the shared library boundary, which -Bsymbolic-functions breaks.
+ */
+void unregister_ops(struct lu_phy_attr *lu, int op) {
+	lu->scsi_ops->ops[op].cmd_perform	   = spc_illegal_op;
+	lu->scsi_ops->ops[op].pre_cmd_perform  = NULL;
+	lu->scsi_ops->ops[op].post_cmd_perform = NULL;
+	lu->scsi_ops->ops[op].timeout		   = 0;
+}
+
+/* REPORT SUPPORTED OPERATION CODES reports a CDB length per op code. Derive it
+ * from the group code (SPC-6 4.3.4) rather than keeping a second table.
+ */
+static int cdb_len_from_opcode(uint8_t op) {
+	switch (op >> 5) {
+	case 0:
+		return 6;
+	case 1:
+	case 2:
+		return 10;
+	case 4:
+		return 16;
+	case 5:
+		return 12;
+	default:
+		/* 3 is reserved and 6 and 7 are vendor specific, so there is no
+		 * defined length. mhvtl's only such command is INITIALIZE ELEMENT
+		 * STATUS WITH RANGE (0xe7), which SMC gives a 10 byte CDB.
+		 */
+		return 10;
+	}
+}
+
+/* One 'command timeouts descriptor' (SPC-6 6.34.2), always emitted because the
+ * only initiator that asks - LTFS - sets RCTD and rejects 8 byte descriptors.
+ */
+static void rsoc_timeout_descriptor(uint8_t *p, uint32_t timeout) {
+	put_unaligned_be16(0x000a, &p[0]); /* descriptor length */
+	put_unaligned_be32(timeout, &p[4]);	 /* nominal timeout */
+	put_unaligned_be32(timeout, &p[8]);	 /* recommended timeout */
+}
+
+#define RSOC_TIMEOUT_DESC_SZ 12
+#define RSOC_MAX_SA			 8
+
+/* Operation codes whose CDB byte 1 carries a service action, with the actions
+ * this implementation answers. The timestamp service actions are handled by
+ * the tape daemon only, so they are reported for sequential access devices
+ * alone. Returns the number of actions, 0 for a plain operation code.
+ */
+static int rsoc_service_actions(struct lu_phy_attr *lu, uint8_t op,
+								uint16_t *sa) {
+	int		 n = 0;
+	uint16_t a;
+
+	switch (op) {
+	case PERSISTENT_RESERVE_IN:
+		for (a = 0; a <= 2; a++) /* READ KEYS to REPORT CAPABILITIES */
+			sa[n++] = a;
+		break;
+	case PERSISTENT_RESERVE_OUT:
+		for (a = 0; a <= 6; a++) /* REGISTER to REGISTER AND IGNORE */
+			sa[n++] = a;
+		break;
+	case READ_POSITION:
+		if (lu->ptype == TYPE_TAPE) {
+			sa[n++] = 0x00; /* short form - block id */
+			sa[n++] = 0x01; /* short form - vendor specific */
+			sa[n++] = 0x06; /* long form */
+			sa[n++] = 0x08; /* extended form */
+		}
+		break;
+	case READ_ATTRIBUTE:
+		if (lu->ptype == TYPE_TAPE) {
+			sa[n++] = 0x00; /* attribute values */
+			sa[n++] = 0x01; /* attribute list */
+			sa[n++] = 0x03; /* partition list */
+		}
+		break;
+	case 0xa3: /* MAINTENANCE IN */
+		sa[n++] = REPORT_SUPPORTED_OPCODES;
+		if (lu->ptype == TYPE_TAPE)
+			sa[n++] = REPORT_TIMESTAMP;
+		break;
+	case 0xa4: /* MAINTENANCE OUT */
+		if (lu->ptype == TYPE_TAPE)
+			sa[n++] = SET_TIMESTAMP;
+		break;
+	case 0xab: /* SERVICE ACTION IN (12) */
+		sa[n++] = 0x01; /* READ MEDIA SERIAL NUMBER */
+		break;
+	}
+	return n;
+}
+
+static uint8_t *rsoc_descriptor(uint8_t *p, uint8_t op, uint16_t sa,
+								int servactv, int rctd, uint32_t timeout) {
+	int desc_sz = rctd ? 8 + RSOC_TIMEOUT_DESC_SZ : 8;
+
+	memset(p, 0, desc_sz);
+	p[0] = op;
+	put_unaligned_be16(sa, &p[2]);
+	p[5] = (rctd ? 0x02 : 0x00) | (servactv ? 0x01 : 0x00);
+	put_unaligned_be16(cdb_len_from_opcode(op), &p[6]);
+	if (rctd)
+		rsoc_timeout_descriptor(&p[8], timeout);
+
+	return p + desc_sz;
+}
+
+static int rsoc_all_commands(struct lu_phy_attr *lu, uint8_t *data, int rctd) {
+	uint8_t *p = &data[4];
+	uint16_t sa[RSOC_MAX_SA];
+	int		 op, nsa, i;
+
+	for (op = 0; op < 256; op++) {
+		if (!lu->scsi_ops->ops[op].timeout)
+			continue;
+
+		/* One descriptor per service action for the commands that have
+		 * them, as SPC requires, and one plain descriptor otherwise.
+		 */
+		nsa = rsoc_service_actions(lu, op, sa);
+		if (nsa)
+			for (i = 0; i < nsa; i++)
+				p = rsoc_descriptor(p, op, sa[i], 1, rctd,
+									lu->scsi_ops->ops[op].timeout);
+		else
+			p = rsoc_descriptor(p, op, 0, 0, rctd,
+								lu->scsi_ops->ops[op].timeout);
+	}
+
+	put_unaligned_be32(p - &data[4], &data[0]);
+	return p - data;
+}
+
+static int rsoc_one_command(struct lu_phy_attr *lu, uint8_t *data, uint8_t op,
+							int rctd, int supported) {
+	uint32_t timeout = lu->scsi_ops->ops[op].timeout;
+	int		 cdb_len = cdb_len_from_opcode(op);
+	int		 sz		 = 4 + cdb_len;
+	int		 i;
+
+	memset(data, 0, sz + RSOC_TIMEOUT_DESC_SZ);
+
+	/* SUPPORT is 011b 'supported per a SCSI standard' or 001b 'not supported',
+	 * with CTDP set only when a timeouts descriptor is appended.
+	 */
+	data[1] = (supported ? 0x03 : 0x01) | (rctd ? 0x80 : 0x00);
+	put_unaligned_be16(cdb_len, &data[2]);
+	data[4] = op;
+	for (i = 5; i < 4 + cdb_len; i++)
+		data[i] = 0xff; /* every CDB bit may be set */
+
+	if (rctd) {
+		rsoc_timeout_descriptor(&data[sz], timeout);
+		sz += RSOC_TIMEOUT_DESC_SZ;
+	}
+
+	return sz;
+}
+
+static uint8_t rsoc_invalid_field(struct scsi_cmd *cmd, int field_pointer) {
+	struct s_sd sd;
+
+	sd.byte0		 = SKSV | CD;
+	sd.field_pointer = field_pointer;
+	cmd->dbuf_p->sz	 = 0;
+	sam_illegal_request(E_INVALID_FIELD_IN_CDB, &sd, &cmd->dbuf_p->sam_stat);
+	return SAM_STAT_CHECK_CONDITION;
+}
+
+uint8_t spc_report_supported_opcodes(struct scsi_cmd *cmd) {
+	uint8_t	   *cdb		 = cmd->scb;
+	uint8_t	   *sam_stat = &cmd->dbuf_p->sam_stat;
+	uint8_t	   *data	 = cmd->dbuf_p->data;
+	uint32_t	alloc_len = get_unaligned_be32(&cdb[6]);
+	int			rctd	  = cdb[2] & 0x80;
+	uint8_t		op		  = cdb[3];
+	uint16_t	reqsa	  = get_unaligned_be16(&cdb[4]);
+	uint16_t	sa[RSOC_MAX_SA];
+	int			nsa, i, supported;
+	int			sz;
+
+	MHVTL_DBG(1, "REPORT SUPPORTED OPERATION CODES (%ld) **",
+			  (long)cmd->dbuf_p->serialNo);
+
+	nsa = rsoc_service_actions(cmd->lu, op, sa);
+
+	switch (cdb[2] & 0x07) {
+	case 0x00: /* All commands */
+		sz = rsoc_all_commands(cmd->lu, data, rctd);
+		break;
+	case 0x01: /* One command; invalid for commands with service actions */
+		if (nsa)
+			return rsoc_invalid_field(cmd, 2);
+		sz = rsoc_one_command(cmd->lu, data, op, rctd,
+							  cmd->lu->scsi_ops->ops[op].timeout != 0);
+		break;
+	case 0x02: /* One command and service action; invalid without them */
+	case 0x03: /* As 0x02 when there are service actions, else as 0x01 */
+		if (!nsa) {
+			if ((cdb[2] & 0x07) == 0x02)
+				return rsoc_invalid_field(cmd, 2);
+			if (reqsa)
+				return rsoc_invalid_field(cmd, 4);
+			sz = rsoc_one_command(cmd->lu, data, op, rctd,
+								  cmd->lu->scsi_ops->ops[op].timeout != 0);
+			break;
+		}
+		supported = 0;
+		if (cmd->lu->scsi_ops->ops[op].timeout)
+			for (i = 0; i < nsa; i++)
+				if (sa[i] == reqsa)
+					supported = 1;
+		sz = rsoc_one_command(cmd->lu, data, op, rctd, supported);
+		break;
+	default:
+		return rsoc_invalid_field(cmd, 2);
+	}
+
+	cmd->dbuf_p->sz = min((uint32_t)sz, alloc_len);
+	*sam_stat		= SAM_STAT_GOOD;
+	return SAM_STAT_GOOD;
+}
+
+/* MAINTENANCE IN service action dispatch for device types that have no
+ * type-specific handler of their own.
+ */
+uint8_t spc_maintenance_in(struct scsi_cmd *cmd) {
+	uint8_t service_action = cmd->scb[1] & 0x1f;
+
+	switch (service_action) {
+	case REPORT_SUPPORTED_OPCODES:
+		return spc_report_supported_opcodes(cmd);
+	default:
+		/* The op code is valid, the service action is not */
+		MHVTL_DBG(1, "MAINTENANCE IN, unsupported service action 0x%02x",
+				  service_action);
+		return rsoc_invalid_field(cmd, 1);
+	}
+}
