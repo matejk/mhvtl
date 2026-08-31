@@ -272,10 +272,8 @@ const char *Check_Params(int argc, char **argv) {
 			}
 			if (!strcmp(argv[2], "exit")) {
 				if (argc == 3)
-					return;
-			}
-			if (!strncasecmp(argv[2], "InquiryDataChange", 17)) {
-				return;
+					return NULL;
+				return "exit";
 			}
 			if (!strncasecmp(argv[2], "InquiryDataChange", 17))
 				return NULL;
