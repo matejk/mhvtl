@@ -27,8 +27,8 @@ Description: virtual tape library for Linux
  targets. Tape media is stored as regular files on disk.
  .
  It is used to test and develop backup and archival software without
- physical tape hardware, and supports LTO, IBM 3592, StorageTek T10000
- and several other drive and library personalities.
+ physical tape hardware. It emulates LTO, DLT and AIT tape drives, and
+ tape libraries from vendors such as IBM, HP, Quantum and Spectra Logic.
  .
  This package provides the user-space daemons, command line tools and
  systemd units. The kernel module is supplied by mhvtl-dkms.
