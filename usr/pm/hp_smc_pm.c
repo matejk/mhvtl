@@ -40,7 +40,7 @@ static void update_eml_vpd_83(struct lu_phy_attr *lu) {
 	pg = PCODE_OFFSET(0x83);
 	if (lu_vpd[pg]) /* Free any earlier allocation */
 		dealloc_vpd(lu_vpd[pg]);
-	lu_vpd[pg] = alloc_vpd(num + 12);
+	lu_vpd[pg] = alloc_vpd(num + 16);
 	if (!lu_vpd[pg]) {
 		MHVTL_ERR("Can't malloc() to setup for vpd_83");
 		return;
