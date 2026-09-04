@@ -1,0 +1,55 @@
+mhvtl for Debian
+================
+
+Differences from the upstream build
+-----------------------------------
+
+Tape media is stored in /var/lib/mhvtl instead of the upstream default of
+/opt/mhvtl. Debian Policy 9.1.1 reserves /opt for software that is not
+shipped by the distribution.
+
+The kernel module is not built at package build time. It is shipped as
+source in mhvtl-dkms and built by DKMS for the running kernel. Kernel
+headers matching the running kernel must be installed, otherwise the DKMS
+build fails and the module will be missing.
+
+Starting the service
+--------------------
+
+The daemon instances are generated from /etc/mhvtl/device.conf by a systemd
+generator, so the units are templates and are not enabled individually.
+After editing the configuration, start everything with:
+
+    systemctl start mhvtl.target
+
+Run make_vtl_media(1) once to create the initial media if /var/lib/mhvtl is
+empty.
+
+Why the daemons run as root
+---------------------------
+
+vtltape and vtllibrary run as root. This is not an oversight, and the
+following was checked before deciding:
+
+The daemons create their own character device node with mknod("/dev/mhvtlN")
+in chrdev_create(). The kernel module registers a dynamic character major
+but never calls device_create(), so no uevent is emitted and udev cannot
+create the nodes instead.
+
+Granting only CAP_MKNOD to an unprivileged daemon is not enough: mknod also
+needs write permission on /dev, which is root-owned and mode 0755, so the
+call fails with EACCES before the capability is consulted. Adding
+CAP_DAC_OVERRIDE makes it work but is equivalent to root for file access,
+which defeats the purpose.
+
+Running fully unprivileged is possible, because mknod on an existing path
+returns EEXIST and chrdev_create() already treats that as success. It would
+require a privileged step to create and chown the nodes before the daemons
+start. That is a change to the shared systemd units rather than to the
+packaging, so it has not been done here.
+
+The units instead drop everything root is not needed for: NoNewPrivileges,
+a CapabilityBoundingSet reduced to CAP_MKNOD, CAP_SYS_RESOURCE and
+CAP_DAC_OVERRIDE, and the ProtectSystem, ProtectHome, ProtectKernel* and
+Restrict* directives. PrivateDevices is deliberately left off because it
+would replace /dev with a private instance and hide the mhvtl nodes.
