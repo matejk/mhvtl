@@ -121,6 +121,14 @@ typedef enum {
 #define INSTATUS_NO_BARCODE 0x01
 
 #define VOLTAG_LEN 36 /* size of voltag area in RES descriptor */
+/* Of which the leading bytes are the volume identifier. The remainder is
+ * the identification field qualifier, a reserved byte and the sequence
+ * number (SMC-2 5.4.3).
+ */
+#define VOLTAG_ID_LEN 32
+/* Volume identification field qualifier values (SMC-2 table 2) */
+#define VOLTAG_VIQ_DETERMINED 0x00
+#define VOLTAG_VIQ_UNREADABLE 0x02
 
 #define VPD_83_SZ 50
 #define VPD_86_SZ 0x3c

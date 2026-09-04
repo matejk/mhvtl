@@ -13,6 +13,11 @@ static struct smc_personality_template smc_pm = {
 	.library_has_barcode_reader = TRUE,
 	.library_has_playground		= TRUE,
 
+	/* This personality advertises SPI-4, so the drives sit at SCSI bus
+	 * addresses and the element descriptor reports them.
+	 */
+	.report_scsi_bus_address = TRUE,
+
 	.dvcid_len = 32,
 };
 

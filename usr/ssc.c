@@ -527,7 +527,7 @@ uint8_t check_restrictions(struct scsi_cmd *cmd) {
 
 			uint64_t TAflag;
 
-			lu_priv->OK_2_write		 = 0;
+			*lu_priv->OK_2_write	 = 0;
 			lu_priv->allow_overwrite = FALSE;
 			sam_data_protect(E_MEDIUM_OVERWRITE_ATTEMPT, sam_stat);
 			/* And set TapeAlert flg 09 -> WRITE PROTECT */
@@ -677,8 +677,8 @@ uint8_t ssc_locate(struct scsi_cmd *cmd) {
 	case LOCATE_16:
 		if (cdb[1] & 0b00000010)
 			partition_no = cdb[3];
-		switch (cdb[1] & 0b00011000) { /* Destination Type */
-		case 0b00:					   /* with logical object identifier */
+		switch ((cdb[1] >> 3) & 0b00000011) { /* Destination Type */
+		case 0b00:							  /* with logical object identifier */
 			blk_no = get_unaligned_be64(&cdb[4]);
 			/* mhvtl only supports u32 blk_numbers so blk_no will be truncated */
 			break;
@@ -687,6 +687,7 @@ uint8_t ssc_locate(struct scsi_cmd *cmd) {
 			break;
 		case 0b11: /* finish with EOD */
 			blk_no = last_block(partition_no);
+			break;
 		default:
 			sam_illegal_request(E_INVALID_FIELD_IN_CDB, NULL, sam_stat);
 			return SAM_STAT_CHECK_CONDITION;
@@ -866,16 +867,29 @@ static uint8_t configure_timestamp(struct scsi_cmd *cmd) {
 	return SAM_STAT_GOOD;
 }
 
+/* An operation code that is defined but whose service action is not supported.
+ * SPC-6 5.6 puts the field in error at the service action, not at the
+ * operation code, so this cannot use log_opcode().
+ */
+static uint8_t unsupported_service_action(char *name, struct scsi_cmd *cmd) {
+	struct s_sd sd;
+
+	MHVTL_DBG(1, "*** Unsupported service action: %s ***", name);
+	sd.byte0		 = SKSV | CD;
+	sd.field_pointer = 1;
+	sam_illegal_request(E_INVALID_FIELD_IN_CDB, &sd, &cmd->dbuf_p->sam_stat);
+	MHVTL_DBG_PRT_CDB(1, cmd);
+	return SAM_STAT_CHECK_CONDITION;
+}
+
 uint8_t ssc_a3_service_action(struct scsi_cmd *cmd) {
 	declare_ssc_vars;
 
 	switch (cdb[1] & 0x1f) {
 	case MANAGEMENT_PROTOCOL_IN:
-		log_opcode("MANAGEMENT PROTOCOL IN **", cmd);
-		break;
+		return unsupported_service_action("MANAGEMENT PROTOCOL IN", cmd);
 	case REPORT_ALIASES:
-		log_opcode("REPORT ALIASES **", cmd);
-		break;
+		return unsupported_service_action("REPORT ALIASES", cmd);
 	case REPORT_SUPPORTED_OPCODES:
 		return spc_report_supported_opcodes(cmd);
 	case REPORT_TIMESTAMP:
@@ -883,8 +897,7 @@ uint8_t ssc_a3_service_action(struct scsi_cmd *cmd) {
 		return report_timestamp(cmd);
 		break;
 	default:
-		log_opcode("UNKNOWN SERVICE ACTION A3 **", cmd);
-		break;
+		return unsupported_service_action("UNKNOWN SERVICE ACTION A3", cmd);
 	}
 	return *sam_stat;
 }
@@ -894,21 +907,17 @@ uint8_t ssc_a4_service_action(struct scsi_cmd *cmd) {
 
 	switch (cdb[1] & 0x1f) {
 	case MANAGEMENT_PROTOCOL_OUT:
-		log_opcode("MANAGEMENT PROTOCOL OUT **", cmd);
-		break;
+		return unsupported_service_action("MANAGEMENT PROTOCOL OUT", cmd);
 	case CHANGE_ALIASES:
-		log_opcode("CHANGE ALIASES **", cmd);
-		break;
+		return unsupported_service_action("CHANGE ALIASES", cmd);
 	case FORCED_EJECT:
-		log_opcode("FORCED EJECT **", cmd);
-		break;
+		return unsupported_service_action("FORCED EJECT", cmd);
 	case SET_TIMESTAMP:
 		MHVTL_DBG(1, "SET TIMESTAMP (%ld) **", (long)dbuf_p->serialNo);
 		return configure_timestamp(cmd);
 		break;
 	default:
-		log_opcode("UNKNOWN SERVICE ACTION A4 **", cmd);
-		break;
+		return unsupported_service_action("UNKNOWN SERVICE ACTION A4", cmd);
 	}
 	return *sam_stat;
 }
@@ -965,6 +974,7 @@ uint8_t ssc_mode_select(struct scsi_cmd *cmd) {
 	int			page_format;
 	int			mselect_6 = 0;
 	int			page;
+	int			subpage;
 	int			offset;
 	int			mode_medium_type;
 	int			mode_dev_spec_param;
@@ -1116,11 +1126,24 @@ uint8_t ssc_mode_select(struct scsi_cmd *cmd) {
 	i += mode_block_descriptor_len;
 	j = 0;
 	while (i < count) {
-		offset	 = 2;
-		page	 = buf[i];
-		page_len = buf[i + 1];
+		/* A page with SPF set carries the subpage code in byte 1 and a two
+		 * byte page length in bytes 2-3; a page_0 page has a one byte
+		 * length in byte 1 and no subpage.
+		 */
+		if (buf[i] & 0x40) {
+			page	 = buf[i] & 0x3f;
+			subpage	 = buf[i + 1];
+			page_len = get_unaligned_be16(&buf[i + 2]);
+			offset	 = 4;
+		} else {
+			page	 = buf[i] & 0x3f;
+			subpage	 = 0;
+			page_len = buf[i + 1];
+			offset	 = 2;
+		}
 
-		MHVTL_DBG(2, " Page: 0x%02x, Page Len: 0x%02x", page, page_len);
+		MHVTL_DBG(2, " Page: 0x%02x, Subpage: 0x%02x, Page Len: 0x%02x",
+				  page, subpage, page_len);
 
 		if (page_len) {
 			MHVTL_DBG(3, " %02d: %02x %02x %02x %02x"
@@ -1166,17 +1189,16 @@ uint8_t ssc_mode_select(struct scsi_cmd *cmd) {
 			break;
 
 		case MODE_DEVICE_CONFIGURATION:
-			/* If this is '01' it's a subpage value
-			 *     i.e. DEVICE CONFIGURATION EXTENSION
-			 * If it's 0x0e, it indicates a page length
-			 * for MODE DEVICE CONFIGURATION
-			 */
-			if (page_len == 0x01) {
+			if (subpage == 0x01) { /* DEVICE CONFIGURATION EXTENSION */
 				if (set_device_configuration_extension(cmd, &buf[i]))
 					return SAM_STAT_CHECK_CONDITION;
-				/* Subpage 1 - override default page length */
-				page_len = get_unaligned_be16(&buf[i + 2]);
-				offset	 = 4;
+			} else if (subpage) {
+				MHVTL_DBG(2, "Device Configuration - Subpage: 0x%02x not supported",
+						  subpage);
+				sd.byte0		 = SKSV;
+				sd.field_pointer = i + 1;
+				sam_illegal_request(E_INVALID_FIELD_IN_CDB, &sd, sam_stat);
+				return SAM_STAT_CHECK_CONDITION;
 			} else if (page_len >= 0x0e) {
 				set_device_configuration(cmd, &buf[i]);
 			} else {
@@ -1190,12 +1212,10 @@ uint8_t ssc_mode_select(struct scsi_cmd *cmd) {
 			break;
 
 		case MODE_CONTROL:
-			if (page_len == 0x0a) {					  /* Control mode page - byte[1] is page len */
+			if (!subpage) {							  /* Control mode page */
 				MHVTL_DBG(3, "Setting Mode Control"); /* Silently accept this worked, but really did not change anything */
 			} else {
-				/* Otherwise, subpage handling - where page len is byte[2] & byte[3] */
-				page_len = get_unaligned_be16(&buf[i + 2]);
-				if (buf[1 + i] == 0xf0) {
+				if (subpage == 0xf0) {
 					/* Logical Block Protection */
 					MHVTL_DBG(2, "Setting LBP method: %d, LBP length: %d, LBP_W: %s, LBP_R: %s",
 							  buf[4 + i], buf[5 + i],
@@ -1268,7 +1288,10 @@ uint8_t ssc_write_attributes(struct scsi_cmd *cmd) {
 		return SAM_STAT_CHECK_CONDITION;
 		break;
 	}
-	return SAM_STAT_GOOD;
+	/* resp_write_attribute() and rewriteMAM() report failures through the
+	 * sense buffer, so returning GOOD unconditionally would hide them.
+	 */
+	return *sam_stat;
 }
 
 uint8_t ssc_tur(struct scsi_cmd *cmd) {
@@ -1398,7 +1421,8 @@ uint8_t ssc_read_attributes(struct scsi_cmd *cmd) {
 		break;
 	}
 
-	if (cdb[7] > mam.num_partitions) {
+	/* Partition numbers are zero based */
+	if (cdb[7] >= mam.num_partitions) {
 		sam_illegal_request(E_INVALID_FIELD_IN_CDB, NULL, sam_stat);
 		MHVTL_DBG(1, "Not enough partitions : requested partition %d over %d ", cdb[7], mam.num_partitions);
 		return SAM_STAT_CHECK_CONDITION;
@@ -1407,14 +1431,24 @@ uint8_t ssc_read_attributes(struct scsi_cmd *cmd) {
 	switch (service_action) {
 	case 0x00: /* Attribute values */
 	case 0x01: /* Attribute list */
-		dbuf_p->sz = resp_read_attribute(cmd);
+		/* resp_read_attribute() returns the available data length, which
+		 * may exceed what the initiator asked for.
+		 */
+		dbuf_p->sz = min((uint32_t)resp_read_attribute(cmd),
+						 get_unaligned_be32(&cdb[10]));
 		break;
-	case 0x03:								 /* Partition list */
-		put_unaligned_be16(0x0002, &buf[0]); /* Available data */
-		buf[1]	   = 0;						 /* First partition number */
-		buf[2]	   = mam.num_partitions;	 /* Number of partitions available */
-		dbuf_p->sz = buf[0];
+	case 0x03: {							  /* Partition list */
+		uint32_t alloc_len = get_unaligned_be32(&cdb[10]);
+
+		/* AVAILABLE DATA is a four byte field and excludes itself; the
+		 * list is one byte of first partition number plus one of count.
+		 */
+		put_unaligned_be32(2, &buf[0]);
+		buf[4]	   = 0;					  /* First partition number */
+		buf[5]	   = mam.num_partitions;  /* Number of partitions available */
+		dbuf_p->sz = min((uint32_t)6, alloc_len);
 		break;
+	}
 	default:
 		sd.byte0		 = SKSV | CD;
 		sd.field_pointer = 1;
@@ -1611,6 +1645,7 @@ uint8_t ssc_read_position(struct scsi_cmd *cmd) {
 
 			MHVTL_DBG(1, "Positioned at partition/block %u/%u", c_pos->partition_id, c_pos->blk_number);
 			cmd->dbuf_p->sz = READ_POSITION_EXTENDED_LEN;
+			break;
 
 		default:
 			MHVTL_DBG(1, "service_action not supported");
@@ -1942,14 +1977,14 @@ uint8_t ssc_log_sense(struct scsi_cmd *cmd) {
 	struct s_sd			sd;
 
 	MHVTL_DBG(1, "LOG SENSE (%ld) ** %s",
-			  (long)dbuf_p->serialNo, log_page_desc[page]);
+			  (long)dbuf_p->serialNo, log_page_name(page));
 
 	if (page == SUPPORTED_LOG_PAGES) { /* Send supported pages */
 		int i = 4;
 		memset(buf, 0, 4); /* Clear first few (4) bytes */
 		buf[i++] = 0;	   /* b[0] is log page '0' (this one) */
 		list_for_each_entry(l, &lu->log_pg, siblings) {
-			MHVTL_DBG(3, "found page 0x%02x : %s", l->log_page_num, log_page_desc[l->log_page_num]);
+			MHVTL_DBG(3, "found page 0x%02x : %s", l->log_page_num, log_page_name(l->log_page_num));
 			buf[i] = l->log_page_num;
 			i++;
 		}

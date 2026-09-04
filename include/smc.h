@@ -25,6 +25,12 @@ struct smc_personality_template {
 	uint32_t library_has_playground : 1;
 	uint32_t dvcid_serial_only : 1;
 	uint32_t no_dvcid_flag : 1;
+	/* Report ID VALID and the drive's SCSI bus address in the data
+	 * transfer element descriptor. SMC-2 marks both fields obsolete,
+	 * but libraries with parallel SCSI drives still populate them
+	 * (HPE, IBM, Quantum); ones without report zero (StorageTek).
+	 */
+	uint32_t report_scsi_bus_address : 1;
 
 	uint32_t start_drive;
 	uint32_t start_picker;

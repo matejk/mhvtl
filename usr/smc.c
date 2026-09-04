@@ -507,11 +507,19 @@ static int fill_ed(struct scsi_cmd *cmd, uint8_t *p, struct s_info *s) {
 	p[j++] = (s->asc_ascq >> 8) & 0xff; /* Additional Sense Code */
 	p[j++] = s->asc_ascq & 0xff;		/* Additional Sense Code Qualifer */
 
-	p[j++] = 0; /* Reserved */
-	if (s->element_type == DATA_TRANSFER)
+	/* ID VALID (bit 5) and the SCSI bus address that follows it were
+	 * removed in SMC-2, but libraries with parallel SCSI drives still
+	 * report them. Reporting an address without ID VALID - which is
+	 * what this did - matches no library either way.
+	 */
+	if (s->element_type == DATA_TRANSFER &&
+		smc_p->pm->report_scsi_bus_address) {
+		p[j++] = 0x20; /* ID VALID */
 		p[j++] = d->SCSI_ID;
-	else
-		p[j++] = 0; /* Reserved */
+	} else {
+		p[j++] = 0;
+		p[j++] = 0;
+	}
 
 	p[j++] = 0; /* Reserved */
 
@@ -521,16 +529,18 @@ static int fill_ed(struct scsi_cmd *cmd, uint8_t *p, struct s_info *s) {
 	else
 		p[j] = 0;
 
-	/* Ref: smc3r12 - Table 28
-	 * 0 - empty,
-	 * 1 - data,
-	 * 2 - cleaning tape,
-	 * 3 - Cleaning,
-	 * 4 - WORM,
-	 * 5 - Microcode image medium
+	/* Medium type, bits 2-0. Bit 3 above it is ED (element disabled),
+	 * so the field is three bits wide and must be masked as such.
+	 *
+	 * Ref: smc3r12 - Table 28
+	 *   0 - unspecified, 1 - data, 2 - cleaning,
+	 *   3 - diagnostic,  4 - WORM, 5 - microcode image
+	 *
+	 * SMC-2 table 17 reserves 3 to 5; they were added in SMC-3 and are
+	 * reported by IBM, HP and Quantum libraries, so they are used here.
 	 */
 	if (s->media)
-		p[j] |= s->media->cart_type & 0x0f;
+		p[j] |= s->media->cart_type & 0x07;
 
 	j++;
 
@@ -542,14 +552,19 @@ static int fill_ed(struct scsi_cmd *cmd, uint8_t *p, struct s_info *s) {
 			  s->slot_location, dvcid, voltag, s->status);
 
 	if (voltag) {
-		/* Barcode with trailing space(s) */
+		/* Only the identifier is blank padded. The qualifier, the
+		 * reserved byte and the sequence number follow it and must be
+		 * left at zero unless they carry a value.
+		 */
+		memset(&p[j], 0, VOLTAG_LEN);
+
 		if (s->status & STATUS_Full) {
 			if (!(s->media->internal_status & INSTATUS_NO_BARCODE))
-				blank_fill(&p[j], s->media->barcode, VOLTAG_LEN);
+				blank_fill(&p[j], s->media->barcode,
+						   VOLTAG_ID_LEN);
 			else
-				memset(&p[j], 0, VOLTAG_LEN);
-		} else
-			memset(&p[j], 0, VOLTAG_LEN);
+				p[j + VOLTAG_ID_LEN] = VOLTAG_VIQ_UNREADABLE;
+		}
 
 		j += VOLTAG_LEN; /* Account for barcode */
 	}
@@ -589,22 +604,24 @@ static int fill_ed(struct scsi_cmd *cmd, uint8_t *p, struct s_info *s) {
 static void fill_element_status_page_hdr(struct scsi_cmd *cmd, uint8_t *p,
 										 uint16_t element_count,
 										 uint8_t  type) {
-	struct smc_priv *smc_p;
-	int				 element_sz;
-	uint32_t		 element_len;
-	uint8_t			 voltag;
+	int		 element_sz;
+	uint32_t element_len;
+	uint8_t	 voltag;
 
-	smc_p  = (struct smc_priv *)cmd->lu->lu_private;
 	voltag = (cmd->scb[1] & 0x10) >> 4;
 
 	element_sz = sizeof_element(cmd, type);
 
 	p[0] = type; /* Element type Code */
 
-	/* Primary Volume Tag set - Returning Barcode info */
+	/* Primary Volume Tag set - Returning Barcode info.
+	 *
+	 * AVolTag stays clear: it would tell the initiator that a second
+	 * 36 byte tag follows each descriptor, and none is emitted. No
+	 * library in the references supports dual sided media, so every
+	 * one of them reports the alternate tag as absent.
+	 */
 	p[1] = (voltag == 0) ? 0 : 0x80;
-	if (smc_p->pm->dvcid_serial_only && type == DATA_TRANSFER)
-		p[1] |= 0x40; /* Set AVolTag */
 
 	/* Number of bytes per element */
 	put_unaligned_be16(element_sz, &p[2]);
@@ -734,9 +751,10 @@ static uint32_t fill_element_page(struct scsi_cmd *cmd, uint8_t *p,
 	uint16_t begin_element;
 	int		 slot_count;
 
+	/* SMC-2 6.10.1: the maximum number of descriptors to create. Zero
+	 * means none - it is not a request for every element.
+	 */
 	max_count = get_unaligned_be16(&cdb[4]);
-	if (max_count == 0)
-		max_count = ~0;
 
 	slot_count = max_count - residual;
 	if (slot_count <= 0)
@@ -804,6 +822,55 @@ static uint32_t fill_element_page(struct scsi_cmd *cmd, uint8_t *p,
 }
 
 /*
+ * Round a transfer length down so that it ends on an element descriptor
+ * boundary.
+ *
+ * SMC-2 6.10.1: when the allocation length is too small for everything,
+ * only descriptors whose complete contents fit are transferred. Cutting
+ * mid-descriptor leaves the initiator with a fragment it cannot tell
+ * apart from a short transfer.
+ *
+ * 'buf' points at the element status data header, 'len' is the length of
+ * all valid data and 'limit' is the initiator's allocation length.
+ */
+static uint32_t trim_to_element_boundary(uint8_t *buf, uint32_t len,
+										 uint32_t limit) {
+	uint32_t offset = 8; /* Element status data header */
+	uint32_t good	= 8;
+
+	if (limit >= len)
+		return len;
+	if (limit < offset)
+		return limit;
+
+	/* Walk each element status page: 8 byte header, then a whole
+	 * number of equally sized descriptors.
+	 */
+	while (offset + 8 <= len) {
+		uint32_t desc_sz	= get_unaligned_be16(&buf[offset + 2]);
+		uint32_t page_bytes = get_unaligned_be24(&buf[offset + 5]);
+		uint32_t used;
+
+		if (!desc_sz)
+			break;
+		if (offset + 8 > limit)
+			break;
+
+		offset += 8;
+		good = offset;
+
+		for (used = 0; used + desc_sz <= page_bytes; used += desc_sz) {
+			if (offset + desc_sz > limit)
+				return good;
+			offset += desc_sz;
+			good = offset;
+		}
+	}
+
+	return good;
+}
+
+/*
  * Build READ ELEMENT STATUS data.
  *
  * Returns number of bytes to xfer back to host.
@@ -867,7 +934,10 @@ uint8_t smc_read_element_status(struct scsi_cmd *cmd) {
 	/* Init buffer */
 	memset(p, 0, alloc_len);
 
-	if (cdb[11] != 0x0) { /* Reserved byte.. */
+	/* CONTROL byte. NACA is not supported (NORMACA is 0 in INQUIRY),
+	 * and linking is obsolete, so no bit here may be set.
+	 */
+	if (cdb[11] != 0x0) {
 		MHVTL_DBG(2, "cdb[11] : Illegal value of %02x", cdb[11]);
 		sd.byte0		 = SKSV | CD;
 		sd.field_pointer = 11;
@@ -879,6 +949,8 @@ uint8_t smc_read_element_status(struct scsi_cmd *cmd) {
 	start = find_first_matching_element(smc_p, req_start_elem, type);
 	if (start == 0) { /* Nothing found.. */
 		MHVTL_DBG(1, "Start element is still 0, line %d", __LINE__);
+		sd.byte0		 = SKSV | CD;
+		sd.field_pointer = 2; /* Starting element address */
 		sam_illegal_request(E_INVALID_FIELD_IN_CDB, &sd, sam_stat);
 		return SAM_STAT_CHECK_CONDITION;
 	}
@@ -966,7 +1038,9 @@ uint8_t smc_read_element_status(struct scsi_cmd *cmd) {
 	if (verbose > 2)
 		decode_element_status(smc_p, cmd->dbuf_p->data);
 
-	cmd->dbuf_p->sz = min(elem_byte_count + 8, alloc_len);
+	cmd->dbuf_p->sz = trim_to_element_boundary(cmd->dbuf_p->data,
+											   elem_byte_count + 8,
+											   alloc_len);
 
 	MHVTL_DBG(2, "Element count: %d, Elem byte count: %d (0x%04x),"
 				 " alloc_len: %d, returning %d",
@@ -1020,8 +1094,17 @@ static void move_cart(struct s_info *src, struct s_info *dest) {
 
 	dest->media = src->media;
 
-	dest->last_location		   = src->slot_location;
-	dest->media->last_location = src->slot_location;
+	/* SMC-2 6.10.4: this is the last *storage* element the medium
+	 * occupied, so a drive or import/export address must not overwrite
+	 * it. Keeping it pointing at the home slot is also what lets
+	 * previous_storage_slot() put the medium back on shutdown.
+	 */
+	if (src->element_type == STORAGE_ELEMENT) {
+		dest->last_location		   = src->slot_location;
+		dest->media->last_location = src->slot_location;
+	} else {
+		dest->last_location = src->media->last_location;
+	}
 
 	setSlotFull(dest);
 	if (is_map_slot(dest))
@@ -1224,6 +1307,10 @@ static int valid_slot(struct smc_priv *smc_p, int addr) {
 	switch (slot_type(smc_p, addr)) {
 	case STORAGE_ELEMENT:
 	case MAP_ELEMENT:
+	/* SMC-2 6.7 allows a medium transport element as either address,
+	 * and the device capabilities page already advertises it.
+	 */
+	case MEDIUM_TRANSPORT:
 		slt = slot2struct(smc_p, addr);
 		if (slt)
 			return TRUE; /* slot, return true */
@@ -1439,15 +1526,27 @@ uint8_t smc_move_medium(struct scsi_cmd *cmd) {
 		sam_illegal_request(E_INVALID_FIELD_IN_CDB, &sd, sam_stat);
 		return SAM_STAT_CHECK_CONDITION;
 	}
-	if (cdb[11] == 0xc0) { /* Invalid combo of Extend/retract I/O port */
+	if ((cdb[11] & 0xc0) == 0xc0) { /* Invalid combo of Extend/retract I/O port */
 		MHVTL_ERR("Extend/retract I/O port invalid");
 		sd.byte0		 = SKSV | CD;
 		sd.field_pointer = 11;
 		sam_illegal_request(E_INVALID_FIELD_IN_CDB, &sd, sam_stat);
 		return SAM_STAT_CHECK_CONDITION;
 	}
-	if (cdb[11]) /* Must be an Extend/Retract I/O port cdb.. NO-OP */
+	/* Bits 7-6 of the CONTROL byte are vendor specific and are used
+	 * here to extend or retract the I/O port, which moves no medium.
+	 * Only those two bits may do that: treating the whole byte as the
+	 * extension would silently discard a real move.
+	 */
+	if (cdb[11] & 0xc0)
 		return SAM_STAT_GOOD;
+	if (cdb[11]) { /* NACA and linking are not supported */
+		MHVTL_DBG(2, "cdb[11] : Illegal value of %02x", cdb[11]);
+		sd.byte0		 = SKSV | CD;
+		sd.field_pointer = 11;
+		sam_illegal_request(E_INVALID_FIELD_IN_CDB, &sd, sam_stat);
+		return SAM_STAT_CHECK_CONDITION;
+	}
 
 	if (transport_addr == 0)
 		transport_addr = smc_p->pm->start_picker;

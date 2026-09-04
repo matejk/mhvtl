@@ -16,6 +16,11 @@ static struct smc_personality_template smc_pm = {
 	.library_has_barcode_reader = TRUE,
 	.library_has_playground		= TRUE,
 
+	/* Advertises SPI-4, and the TS4300 reference documents IDValid and
+	 * the SCSI bus address in the data transfer element descriptor.
+	 */
+	.report_scsi_bus_address = TRUE,
+
 	.dvcid_len = 34,
 };
 
