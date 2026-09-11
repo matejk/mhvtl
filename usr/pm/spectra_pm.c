@@ -80,7 +80,6 @@ void init_spectra_215_smc(struct lu_phy_attr *lu) {
 	smc_pm.library_has_map			  = FALSE;
 	smc_pm.library_has_barcode_reader = TRUE;
 	smc_pm.dvcid_serial_only		  = TRUE;
-	smc_pm.no_dvcid_flag			  = TRUE;
 	smc_pm.dvcid_len				  = 0;
 
 	/* Extracted from Spectra Treefrog-Series SCSI Developers guide */
