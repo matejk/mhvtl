@@ -43,7 +43,8 @@ static void update_scalar_vpd_80(struct lu_phy_attr *lu) {
 	if (lu_vpd) /* Free any earlier allocation */
 		dealloc_vpd(lu_vpd);
 
-	lu_vpd = alloc_vpd(24);
+	lu_vpd							= alloc_vpd(24);
+	lu->lu_vpd[PCODE_OFFSET(0x80)] = lu_vpd;
 	if (lu_vpd) {
 		d = lu_vpd->data;
 		/* d[4 - 27] Serial number prefixed by Vendor ID */
@@ -63,7 +64,8 @@ static void update_scalar_vpd_83(struct lu_phy_attr *lu) {
 	if (lu_vpd) /* Free any earlier allocation */
 		dealloc_vpd(lu_vpd);
 
-	lu_vpd = alloc_vpd(36);
+	lu_vpd							= alloc_vpd(36);
+	lu->lu_vpd[PCODE_OFFSET(0x83)] = lu_vpd;
 	if (lu_vpd) {
 		d	 = lu_vpd->data;
 		d[0] = 0xf2;

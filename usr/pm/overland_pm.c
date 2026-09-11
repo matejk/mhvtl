@@ -29,11 +29,27 @@ static void update_eml_vpd_80(struct lu_phy_attr *lu) {
 }
 
 static void update_eml_vpd_83(struct lu_phy_attr *lu) {
-	struct vpd *vpd_pg = lu->lu_vpd[PCODE_OFFSET(0x83)];
-	uint8_t	   *d;
-	int			num;
-	char	   *ptr;
-	int			len, j;
+	struct vpd **lu_vpd = lu->lu_vpd;
+	struct vpd	*vpd_pg;
+	uint8_t		*d;
+	int			 num;
+	char		*ptr;
+	int			 len, j;
+	int			 pg;
+
+	/* Nothing allocates this page for us - every other personality
+	 * allocates its own VPD pages here.
+	 */
+	num = VENDOR_ID_LEN + PRODUCT_ID_LEN + 10;
+	pg	= PCODE_OFFSET(0x83);
+	if (lu_vpd[pg]) /* Free any earlier allocation */
+		dealloc_vpd(lu_vpd[pg]);
+	lu_vpd[pg] = alloc_vpd(num + 16);
+	if (!lu_vpd[pg]) {
+		MHVTL_ERR("Can't malloc() to setup for vpd_83");
+		return;
+	}
+	vpd_pg = lu_vpd[pg];
 
 	d = vpd_pg->data;
 

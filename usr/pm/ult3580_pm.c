@@ -24,6 +24,7 @@
 #include <unistd.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <errno.h>
 #include <inttypes.h>
 #include "be_byteshift.h"
@@ -162,25 +163,26 @@ static void update_vpd_ult_c0(struct lu_phy_attr *lu) {
 
 	ymd(&year, &month, &day, &h, &m, &s);
 
-	data[1] = 0xc0;
-	data[3] = 0x27;
-
-	sprintf((char *)&data[16], "%02d%02d%02d", h, m, s);
-	sprintf((char *)&data[23], "%04d%02d%02d", year, month, day);
-	sprintf((char *)&data[31], "mhvtl_fl_f");
+	/* 4-15 code name, 16-22 time, 23-30 date, 31-42 platform */
+	sprintf((char *)&data[12], "%02d%02d%02d", h, m, s);
+	sprintf((char *)&data[19], "%04d%02d%02d", year, month, day);
+	sprintf((char *)&data[27], "mhvtl_fl_f");
 }
 
 static void update_vpd_ult_c1(struct lu_phy_attr *lu, char *sn) {
 	uint8_t	   *data;
 	struct vpd *vpd_p;
+	/* Two 12 byte revision fields with no room for a terminator between
+	 * them, so format once and copy the characters only.
+	 */
+	char rev[13];
 
 	vpd_p = lu->lu_vpd[PCODE_OFFSET(0xc1)];
 	data  = vpd_p->data;
 
-	data[1] = 0xc1;
-	data[3] = 0x18;
-	snprintf((char *)&data[4], 13, "%-12.12s", sn);
-	snprintf((char *)&data[16], 13, "%-12.12s", sn);
+	snprintf(rev, sizeof(rev), "%-12.12s", sn);
+	memcpy(&data[0], rev, 12);
+	memcpy(&data[12], rev, 12);
 }
 
 static uint8_t set_ult_WORM(struct list_head *lst) {
@@ -363,11 +365,11 @@ static void init_ult_inquiry(struct lu_phy_attr *lu) {
 	}
 
 	/* VPD page 0xC0 */
-	add_vpd_page(lu, 0xc0, 43);
+	add_vpd_page(lu, 0xc0, 39);
 	update_vpd_ult_c0(lu);
 
 	/* VPD page 0xC1 */
-	add_vpd_page(lu, 0xc1, 28);
+	add_vpd_page(lu, 0xc1, 24);
 	update_vpd_ult_c1(lu, lu->lu_serial_no);
 }
 
